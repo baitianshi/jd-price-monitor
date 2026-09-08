@@ -1,0 +1,33 @@
+# 运行数据
+data/*.db
+data/*.log
+data/monitor.db
+data/cron.log
+data/error.log
+data/scheduler.log
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# 系统文件
+desktop.ini
+
+# PHP - Xdebug
+# xdebug/profiling output
+cachegrind.out.*
+trace.*
+
+# Composer
+/vendor/
+composer.lock
