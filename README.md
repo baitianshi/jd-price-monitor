@@ -82,7 +82,7 @@
 
 | 任务 | 触发条件 | 随机间隔 | 模拟行为 |
 |------|----------|----------|----------|
-| 商品价格检查 | next_check_at <= 当前时间 | 60-120分钟 | 刷新前从 m.jd.com 进入随机浏览3-5个商品页面 |
+| 商品价格检查 | next_check_at <= 当前时间 | 60-120分钟 | 刷新前进入移动端购物车，随机浏览1-3个监控商品详情页 |
 | Cookie检查 | next_cookie_check_at <= 当前时间 | 6-12小时（精确到分钟） | - |
 | 价格保护 | price_protection_last_run + 间隔 <= 当前时间 | 自定义间隔（默认360分钟） | - |
 | 历史数据清理 | next_clean_at <= 当前时间 | 每24小时 | - |
@@ -95,7 +95,7 @@ scheduler.php 每分钟运行
     ├── 1. 检查商品价格（随机单商品）
     │   ├── 查询 next_check_at <= 当前时间的商品
     │   ├── 随机选一个商品
-    │   ├── 从 m.jd.com 进入随机浏览3-5个商品页面（模拟真人）
+    │   ├── 进入移动端购物车，随机浏览1-3个监控商品（模拟真人）
     │   ├── 刷新价格、库存
     │   ├── 记录价格历史（仅当价格或库存变化时）
     │   ├── 触发 webhook（降价/涨价/缺货）
@@ -240,6 +240,15 @@ php scheduler.php force        # 强制执行所有任务（忽略时间）
 
 - **自动检查**：随机 6-12 小时
 - **手动检查**：点击设置页面的"检查Cookie"按钮
+
+### Cookie 自动维护（v2.3.0）
+
+系统会自动捕获每次京东请求响应中的 `Set-Cookie`，与现有 Cookie 合并并持久化到数据库，无需手动干预。
+
+- **自动合并**：价格查询、Cookie 检查、用户信息、随机浏览等请求返回的 Set-Cookie 会自动回写
+- **登录态保护**：登录关键 Cookie（`pt_key`/`pt_pin`/`pt_token`/`thor`/`sso_uc`）变化时自动将状态重置为待验证；普通跟踪 Cookie（`__jda` 等）变化不影响已确认的有效状态
+- **防误删**：京东下发的过期/删除标记（`deleted`、空值）会被忽略，不会误删登录 Cookie
+- **无需操作**：功能自动生效，无新增配置项
 
 ---
 
@@ -411,6 +420,7 @@ php scheduler.php force        # 强制执行所有任务（忽略时间）
 | image_url | TEXT | 图片URL |
 | current_price | REAL | 当前价格 |
 | original_price | REAL | 原价 |
+| plus_price | REAL | PLUS会员价 |
 | target_price | REAL | 目标价格 |
 | lowest_price | REAL | 历史最低价 |
 | highest_price | REAL | 历史最高价 |

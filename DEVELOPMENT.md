@@ -70,7 +70,7 @@
 # 核心调度逻辑
 scheduler.php 每分钟运行：
 1. 商品价格检查：next_check_at <= 当前时间 → 随机60-120分钟
-   - 从 m.jd.com 进入随机浏览3-5个商品页面（模拟真人）
+   - 进入移动端购物车，随机浏览1-3个监控商品（模拟真人）
    - 只在价格或库存变化时记录历史
    - 触发 webhook（降价/涨价/缺货）
 2. Cookie检查：next_cookie_check_at <= 当前时间 → 随机6-12小时
@@ -466,7 +466,7 @@ scheduler.php 每分钟运行
     ├── 1. 检查商品价格
     │   ├── 查询 next_check_at <= 当前时间 的商品
     │   ├── 随机选一个商品
-    │   ├── 从 m.jd.com 进入随机浏览3-5个商品页面（模拟真人）
+    │   ├── 进入移动端购物车，随机浏览1-3个监控商品（模拟真人）
     │   ├── 获取价格、库存
     │   ├── 记录价格历史（仅当价格或库存变化时）
     │   ├── 触发 Webhook（降价/涨价/缺货）
@@ -494,22 +494,18 @@ scheduler.php 每分钟运行
 #### 防风控措施
 
 ```php
-// includes/jd.php - randomBrowseFromMobile()
+// includes/jd.php - randomBrowseCart()
 
-// 1. 先访问 m.jd.com 首页
-// 2. 从首页响应中实时提取商品链接：
-//    - item.m.jd.com/product/xxx.html 格式的链接
-//    - /product/xxx 路径提取后转换为 item.m.jd.com 链接
-//    - sku=xxx 参数提取后转换
-// 3. 链接不拼接任何多余内容，避免错误链接
-// 4. 如果提取的链接不够，自动补充常见页面
-// 4. 随机访问 3-5 个提取到的链接
-// 5. 访问新页面时，30% 概率继续提取商品链接（深度浏览）
+// 1. 先访问移动端购物车 m.jd.com/cart/
+// 2. 从数据库中查询监控中的商品 SKU 列表
+// 3. 对 SKU 列表去重、过滤空值、重建索引
+// 4. 随机抽取 1-3 个监控商品，浏览移动端详情页：
+//    item.m.jd.com/product/{skuId}.html
+// 5. 每个详情页随机停留 2-4 秒
+// 6. 若没有监控商品，则仅访问购物车页面
 
-// 每个页面停留 2-4 秒
-// 总耗时约 10-20 秒
 // 所有请求使用移动端 User-Agent 和 m.jd.com Referer
-// 如果提取的链接不够，自动补充常见页面
+// 浏览路径贴近真实用户（购物车 -> 商品），避免从首页发散抓链接
 ```
 
 #### 时间字段说明
@@ -917,6 +913,13 @@ CREATE TABLE settings (
 
 > 注：`next_protection_at` 字段已不再参与调度（由 `price_protection_interval` + `price_protection_last_run` 替代），迁移代码保留仅为兼容旧库。
 
+#### Cookie 自动维护开发约定（v2.3.0）
+
+- 所有携带 Cookie 的京东请求**必须**通过 `JdPrice::execWithCookieCapture($ch)` 执行（而非直接 `curl_exec`），以便自动捕获并回写 `Set-Cookie`；无 Cookie 的请求（公开 API、短链接解析）可保持 `curl_exec`
+- `mergeAndPersistCookies()` 的 `cookie_status` 重置语义：**仅**登录关键 Cookie（`pt_key`/`pt_pin`/`pt_token`/`thor`/`sso_uc`）变化时重置为 `'unknown'`，普通跟踪 Cookie 变化只更新值——不要改为"所有变化都重置"，否则会破坏调度器的"有效→失效"通知逻辑
+- 合并时自动忽略空值和 `deleted` 标记，防止京东过期 Cookie 误删登录态
+- 新增关键 Cookie 类型（如新增登录依赖字段）时，需同步维护 `mergeAndPersistCookies()` 中的登录关键 Cookie 白名单
+
 ---
 
 ## 六、开发注意事项
@@ -1141,14 +1144,14 @@ $nextCheck = date('Y-m-d H:i:s', strtotime("+{$nextHours} hours +{$nextMinutes} 
 
 ### 防风控注意事项
 
-#### 随机浏览链接
+#### 购物车浏览模拟
 
 ```php
-// ✅ 正确：只提取商品链接
-preg_match_all('/item\.m\.jd\.com\/product\/(\d+)\.html/i', $html, $matches);
+// ✅ 正确：进入购物车后，从监控商品中随机抽取浏览
+$jd->randomBrowseCart(['100012345', '100067890']);
 
-// ❌ 错误：提取所有链接可能包含 CDN、广告等
-preg_match_all('/href=["\']([^"\']+)["\']/i', $html, $matches);
+// ❌ 错误：从首页抓取所有链接随机跳转
+//    （CDN、广告、活动页混入，且发散路径易被风控识别）
 ```
 
 #### 链接格式

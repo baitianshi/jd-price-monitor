@@ -91,6 +91,7 @@ if ($task === 'all' || $task === 'update_prices') {
         $newStockStatus = $productInfo['stock_status'] ?? $oldStockStatus;
         $newStockNum = $productInfo['stock_num'] ?? null;
         $originalPrice = $productInfo['original_price'] ?? $newPrice;
+        $plusPrice = $productInfo['plus_price'] ?? 0;
         
         if ($newPrice > 0) {
             $lowestPrice = floatval($product['lowest_price']);
@@ -107,6 +108,7 @@ if ($task === 'all' || $task === 'update_prices') {
                 "UPDATE products SET 
                     current_price = ?, 
                     original_price = ?, 
+                    plus_price = ?,
                     lowest_price = ?,
                     highest_price = ?,
                     stock_status = ?,
@@ -114,7 +116,7 @@ if ($task === 'all' || $task === 'update_prices') {
                     last_checked_at = datetime('now', 'localtime'),
                     updated_at = datetime('now', 'localtime') 
                 WHERE id = ?",
-                [$newPrice, $originalPrice, $lowestPrice, $highestPrice, $newStockStatus, $newStockNum, $product['id']]
+                [$newPrice, $originalPrice, $plusPrice, $lowestPrice, $highestPrice, $newStockStatus, $newStockNum, $product['id']]
             );
             
             $db->execute(

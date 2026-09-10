@@ -1,20 +1,41 @@
 <?php
 /**
- * 京东价格获取类 - 基于移动端 m.jd.com
+ * 京东价格获取类 - 反爬增强版
+ * - 稳定设备指纹（MacBook Pro）
+ * - Cookie 分域存储
+ * - TLS 指纹模拟
+ * - Header 顺序模拟
+ * - 行为多样性（库存/评价接口）
+ * - 接口失败降级
  */
 
 require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/jd_antiban.php';
 
 class JdPrice {
     private $db;
     private $cookies = '';
     private $lastError = '';
     private $lastErrorType = '';
-    
-    // 移动端API常量
+
+    // === 反爬增强组件 ===
+    /** @var JdDeviceFingerprint */
+    private $deviceFp;
+    /** @var JdCookieJar */
+    private $cookieJar;
+    /** @var JdRequestForgery */
+    private $requestForgery;
+    /** @var JdBehaviorSimulator */
+    private $behaviorSim;
+    /** @var JdApiDegradation */
+    private $degradation;
+
+    // 记录是否已执行过前置页面访问（避免同一个sku重复访问）
+    private $preVisitedSkus = [];
+
+    // 移动端API常量（保留兼容，但主要走MacBook Pro Chrome指纹）
     const MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1';
     const PC_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-    const M_JD_REFERER = 'https://m.jd.com/';
     
     // 价格获取方法优先级（根据成功率动态调整）
     private $priceMethodStats = [
@@ -46,6 +67,19 @@ class JdPrice {
         $this->db = Database::getInstance();
         $this->loadCookies();
         $this->loadMethodStats();
+
+        // === 初始化反爬增强组件 ===
+        $this->deviceFp = new JdDeviceFingerprint();
+        $this->cookieJar = new JdCookieJar();
+        $this->requestForgery = new JdRequestForgery($this->deviceFp, $this->cookieJar);
+        $this->behaviorSim = new JdBehaviorSimulator($this->requestForgery, $this->cookieJar, $this->deviceFp);
+        $this->degradation = new JdApiDegradation();
+
+        // 确保设备跟踪Cookie存在（__jda/__jdb/__jdc/__jdu/guid/_t）
+        $this->cookieJar->ensureDeviceCookies($this->deviceFp);
+
+        // 同步Cookie到旧属性（向后兼容）
+        $this->cookies = $this->cookieJar->getMainCookieString();
     }
     
     /**
@@ -56,6 +90,115 @@ class JdPrice {
         if ($settings && !empty($settings['jd_cookies'])) {
             $this->cookies = $settings['jd_cookies'];
         }
+    }
+    
+    /**
+     * 解析Cookie字符串为数组
+     */
+    private function parseCookieStringToArray($cookieStr) {
+        $cookies = [];
+        if (empty($cookieStr)) {
+            return $cookies;
+        }
+        foreach (explode(';', $cookieStr) as $part) {
+            $part = trim($part);
+            if ($part === '') {
+                continue;
+            }
+            $eqPos = strpos($part, '=');
+            if ($eqPos === false) {
+                continue;
+            }
+            $name = trim(substr($part, 0, $eqPos));
+            $value = trim(substr($part, $eqPos + 1));
+            if ($name !== '') {
+                $cookies[$name] = $value;
+            }
+        }
+        return $cookies;
+    }
+    
+    /**
+     * 合并新捕获的Set-Cookie并持久化到数据库
+     * 仅当登录态关键Cookie（pt_key/pt_pin等）变化时重置cookie_status，
+     * 普通跟踪Cookie变化仅更新值，避免影响失效通知逻辑
+     */
+    private function mergeAndPersistCookies($newCookies) {
+        if (empty($newCookies) || empty($this->cookies)) {
+            return;
+        }
+        
+        $current = $this->parseCookieStringToArray($this->cookies);
+        $changed = false;
+        $loginChanged = false;
+        
+        foreach ($newCookies as $name => $value) {
+            // 忽略空值/删除标记（保护pt_key等关键Cookie不被误删）
+            if ($value === '' || strtolower($value) === 'deleted') {
+                continue;
+            }
+            if (!isset($current[$name]) || $current[$name] !== $value) {
+                $current[$name] = $value;
+                $changed = true;
+                if (in_array($name, ['pt_key', 'pt_pin', 'pt_token', 'thor', 'sso_uc'], true)) {
+                    $loginChanged = true;
+                }
+            }
+        }
+        
+        if (!$changed) {
+            return;
+        }
+        
+        $parts = [];
+        foreach ($current as $name => $value) {
+            $parts[] = $name . '=' . $value;
+        }
+        $newCookieStr = implode('; ', $parts) . ';';
+        
+        if ($newCookieStr === $this->cookies) {
+            return;
+        }
+        
+        if ($loginChanged) {
+            $this->db->execute(
+                "UPDATE settings SET jd_cookies = ?, cookie_status = 'unknown', updated_at = datetime('now', 'localtime') WHERE id = 1",
+                [$newCookieStr]
+            );
+        } else {
+            $this->db->execute(
+                "UPDATE settings SET jd_cookies = ?, updated_at = datetime('now', 'localtime') WHERE id = 1",
+                [$newCookieStr]
+            );
+        }
+        $this->cookies = $newCookieStr;
+    }
+    
+    /**
+     * 执行请求并自动捕获响应中的Set-Cookie，维护Cookie链
+     * 使用CURLOPT_HEADERFUNCTION避免污染响应体
+     */
+    private function execWithCookieCapture($ch) {
+        $capturedCookies = [];
+        
+        curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($ch, $headerLine) use (&$capturedCookies) {
+            if (preg_match('/^Set-Cookie:\s*([^;=\s]+)\s*=\s*([^;]*)/i', $headerLine, $m)) {
+                $name = trim($m[1]);
+                $value = trim($m[2]);
+                if ($value !== '' && strtolower($value) !== 'deleted') {
+                    $capturedCookies[$name] = $value;
+                }
+            }
+            return strlen($headerLine);
+        });
+        
+        $response = curl_exec($ch);
+        
+        if (!empty($capturedCookies)) {
+            $this->mergeAndPersistCookies($capturedCookies);
+        }
+        
+        return $response;
     }
     
     /**
@@ -124,7 +267,7 @@ class JdPrice {
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_MAXREDIRS => 3,
         ]);
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
         
@@ -134,169 +277,146 @@ class JdPrice {
             'response' => $response,
         ];
     }
+
+    /**
+     * 增强版请求 - 使用反爬模块（TLS指纹 + Header顺序 + Cookie分域）
+     * @param string $url 请求URL
+     * @param string $type 请求类型: html/json/image/script
+     * @param string $referer 来源页
+     * @param array $options 额外选项: timeout, follow_location, encoding
+     * @return array [success, http_code, response, effective_url]
+     */
+    private function antRequest($url, $type = 'html', $referer = '', $options = []) {
+        $headers = $this->requestForgery->buildHeaders($url, $type, $referer);
+
+        $ch = curl_init();
+        $curlOpts = [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_TIMEOUT => $options['timeout'] ?? 10,
+            CURLOPT_CONNECTTIMEOUT => $options['connect_timeout'] ?? 5,
+            CURLOPT_ENCODING => $options['encoding'] ?? 'gzip, deflate, br',
+            CURLOPT_FOLLOWLOCATION => $options['follow_location'] ?? true,
+            CURLOPT_MAXREDIRS => $options['max_redirs'] ?? 5,
+            CURLOPT_HEADER => false,
+            CURLOPT_USERAGENT => $this->deviceFp->getUserAgent(),
+        ];
+        curl_setopt_array($ch, $curlOpts);
+
+        // 配置 TLS 指纹
+        $this->requestForgery->configureCurlTls($ch);
+
+        // 执行请求并捕获 Cookie
+        $response = $this->requestForgery->execRequest($ch, $url);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $effectiveUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        // 同步Cookie到旧属性（向后兼容）
+        $this->cookies = $this->cookieJar->getMainCookieString();
+
+        return [
+            'success' => $httpCode == 200,
+            'http_code' => $httpCode,
+            'response' => $response,
+            'effective_url' => $effectiveUrl,
+            'error' => $error,
+        ];
+    }
+
+    /**
+     * 确保已完成商品页前置访问（价格接口调用前必须先逛页面）
+     */
+    private function ensurePreVisit($skuId) {
+        if (isset($this->preVisitedSkus[$skuId])) {
+            return $this->preVisitedSkus[$skuId];
+        }
+
+        $result = $this->behaviorSim->preVisitProductPage($skuId);
+        $this->preVisitedSkus[$skuId] = $result;
+
+        return $result;
+    }
+
+    /**
+     * 执行行为多样性（库存/评价随机查询）
+     */
+    private function triggerBehaviorDiversity($skuId) {
+        // 库存查询（概率触发）
+        $stockResult = $this->behaviorSim->maybeCheckStock($skuId);
+        // 评价查询（概率触发）
+        $commentResult = $this->behaviorSim->maybeCheckComments($skuId);
+        return [
+            'stock' => $stockResult,
+            'comment' => $commentResult,
+        ];
+    }
+
+    /**
+     * 检查接口是否被降级
+     */
+    private function isApiDegraded($apiName) {
+        return !$this->degradation->isAvailable($apiName);
+    }
+
+    /**
+     * 记录接口调用结果（成功/失败）
+     * @return bool 失败时是否触发了降级
+     */
+    private function recordApiResult($apiName, $success) {
+        if ($success) {
+            $this->degradation->recordSuccess($apiName);
+            return false;
+        }
+        return $this->degradation->recordFailure($apiName);
+    }
     
     /**
-     * 从 m.jd.com 首页进入，实时抓取链接随机访问
-     * 模拟真人浏览行为，降低风控风险
-     * @param int $visitCount 访问页面数量（默认3-5个）
+     * 模拟真人浏览：进入移动端购物车，再随机浏览若干监控商品详情页
+     * 浏览路径贴近真实用户（购物车 -> 商品），降低风控风险
+     * @param array $monitorSkus 监控中的商品SKU列表
      * @return array 访问结果
      */
-    public function randomBrowseFromMobile($visitCount = null) {
-        if ($visitCount === null) {
-            $visitCount = rand(3, 5);
-        }
-        
+    public function randomBrowseCart($monitorSkus = []) {
         $visitedPages = [];
-        $allLinks = [];
         
-        // 1. 先访问 m.jd.com 首页
-        $result = $this->makeRequest('https://m.jd.com/');
+        // 1. 进入移动端购物车
+        $result = $this->makeRequest('https://m.jd.com/cart/');
         $visitedPages[] = [
-            'url' => 'https://m.jd.com/',
+            'url' => 'https://m.jd.com/cart/',
             'success' => $result['success']
         ];
         
-        // 2. 从首页响应中提取商品链接 (item.m.jd.com/product/xxx.html)
-        if ($result['success'] && !empty($result['response'])) {
-            $html = $result['response'];
+        // 2. 从监控商品中随机抽取1-3个，浏览移动端详情页
+        $monitorSkus = array_values(array_unique(array_filter($monitorSkus)));
+        if (!empty($monitorSkus)) {
+            $visitCount = min(rand(1, 3), count($monitorSkus));
+            shuffle($monitorSkus);
+            $selectedSkus = array_slice($monitorSkus, 0, $visitCount);
             
-            // 提取 item.m.jd.com/product/xxx.html 格式的链接
-            preg_match_all('/item\.m\.jd\.com\/product\/(\d+)\.html/i', $html, $matches);
-            if (!empty($matches[0])) {
-                foreach ($matches[0] as $link) {
-                    $allLinks[] = 'https://' . $link;
-                }
-            }
-            
-            // 提取 /product/xxx 格式，转换为 item.m.jd.com 链接
-            preg_match_all('/["\']\/product\/(\d+)/i', $html, $productMatches);
-            if (!empty($productMatches[1])) {
-                foreach ($productMatches[1] as $skuId) {
-                    $allLinks[] = "https://item.m.jd.com/product/{$skuId}.html";
-                }
-            }
-            
-            // 提取 sku=xxx 或 skuId=xxx 参数
-            preg_match_all('/[?&]sku(?:Id)?=(\d+)/i', $html, $skuMatches);
-            if (!empty($skuMatches[1])) {
-                foreach ($skuMatches[1] as $skuId) {
-                    $allLinks[] = "https://item.m.jd.com/product/{$skuId}.html";
-                }
-            }
-        }
-        
-        // 去重
-        $allLinks = array_unique($allLinks);
-        
-        // 如果抓取到的链接不够，补充一些常见页面
-        if (count($allLinks) < $visitCount) {
-            $fallbackLinks = [
-                'https://m.jd.com/',
-                'https://m.jd.com/category/all.html',
-                'https://m.jd.com/seckill/',
-                'https://m.jd.com/plus/',
-            ];
-            $allLinks = array_merge($allLinks, $fallbackLinks);
-            $allLinks = array_unique($allLinks);
-        }
-        
-        // 打乱顺序
-        shuffle($allLinks);
-        
-        // 3. 随机访问若干页面
-        $visitedUrls = ['https://m.jd.com/'];
-        for ($i = 1; $i < $visitCount && !empty($allLinks); $i++) {
-            // 随机选择一个未访问过的链接
-            $page = null;
-            while (!empty($allLinks)) {
-                $candidate = array_pop($allLinks);
-                if (!in_array($candidate, $visitedUrls)) {
-                    $page = $candidate;
-                    break;
-                }
-            }
-            
-            if (!$page) {
-                break;
-            }
-            
-            $visitedUrls[] = $page;
-            
-            // 随机停留时间（2-4秒）
-            $delay = rand(2, 4);
-            sleep($delay);
-            
-            $result = $this->makeRequest($page);
-            $visitedPages[] = [
-                'url' => $page,
-                'success' => $result['success'],
-                'delay' => $delay
-            ];
-            
-            // 从新页面继续提取链接（深度浏览）
-            if ($result['success'] && !empty($result['response']) && rand(1, 100) <= 30) {
-                $html = $result['response'];
-                preg_match_all('/product\/(\d+)/i', $html, $productMatches);
-                if (!empty($productMatches[1])) {
-                    foreach (array_slice($productMatches[1], 0, 3) as $skuId) {
-                        $newLink = "https://m.jd.com/product/{$skuId}.html";
-                        if (!in_array($newLink, $visitedUrls)) {
-                            $allLinks[] = $newLink;
-                        }
-                    }
-                }
+            foreach ($selectedSkus as $skuId) {
+                // 随机停留时间（2-4秒）
+                $delay = rand(2, 4);
+                sleep($delay);
+                
+                $page = "https://item.m.jd.com/product/{$skuId}.html";
+                $result = $this->makeRequest($page);
+                $visitedPages[] = [
+                    'url' => $page,
+                    'success' => $result['success'],
+                    'delay' => $delay
+                ];
             }
         }
         
         return [
             'success' => true,
             'visited_count' => count($visitedPages),
-            'extracted_links' => count($allLinks),
+            'cart_count' => count($monitorSkus),
             'pages' => $visitedPages
         ];
-    }
-    
-    public function checkCookieValid() {
-        if (empty($this->cookies)) {
-            return ['valid' => false, 'message' => '未配置京东Cookie'];
-        }
-        
-        $url = "https://api.m.jd.com/client.action?functionId=wareBusiness&appid=m_item_detail&body=" . urlencode(json_encode(['skuId' => '100012043978']));
-        
-        $headers = [
-            'User-Agent: ' . self::MOBILE_USER_AGENT,
-            'Referer: https://m.jd.com/',
-            'Accept: application/json, text/plain, */*',
-            'Cookie: ' . $this->cookies,
-        ];
-        
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_TIMEOUT => 10,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_ENCODING => 'gzip, deflate',
-        ]);
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-        
-        if ($httpCode != 200) {
-            return ['valid' => false, 'message' => '网络请求失败'];
-        }
-        
-        $data = json_decode($response, true);
-        if (isset($data['code']) && $data['code'] == '1') {
-            return ['valid' => false, 'message' => 'Cookie已过期，请重新获取'];
-        }
-        
-        if (isset($data['wareInfo'])) {
-            return ['valid' => true, 'message' => 'Cookie有效'];
-        }
-        
-        return ['valid' => false, 'message' => '无法验证Cookie'];
     }
     
     /**
@@ -417,6 +537,7 @@ class JdPrice {
     
     /**
      * 获取商品信息 - 按顺序尝试多个来源，避免风控
+     * 增强版：前置页面访问 + 接口降级 + 行为多样性
      * @param string $skuId 商品SKU
      * @param bool $skipImage 是否跳过图片获取（用于异步加载）
      * @return array 商品信息，包含status字段表示当前状态
@@ -430,6 +551,7 @@ class JdPrice {
             'image_url' => '',
             'price' => 0,
             'original_price' => 0,
+            'plus_price' => 0,
             'stock_status' => 'unknown',
             'stock_num' => null,
             'source' => '',
@@ -445,23 +567,39 @@ class JdPrice {
             $result['status'] = 'error';
             return $result;
         }
+
+        // === 反爬增强：先访问商品详情页（必须步骤） ===
+        $this->ensurePreVisit($skuId);
+
+        // === 反爬增强：行为多样性（库存/评价随机查询） ===
+        $this->triggerBehaviorDiversity($skuId);
         
-        // 按顺序尝试的方法列表
+        // 按顺序尝试的方法列表（带接口名用于降级检查）
         $methods = [
-            ['name' => 'mobile_page', 'func' => 'getProductInfoFromMobilePage', 'label' => '移动端页面'],
-            ['name' => 'mobile_api', 'func' => 'getProductInfoFromMobile', 'label' => '移动端API'],
-            ['name' => 'public_api', 'func' => 'getProductInfoFromPublicApi', 'label' => '公开API'],
+            ['name' => 'mobile_page', 'api' => 'price_mobile_page', 'func' => 'getProductInfoFromMobilePage', 'label' => '移动端页面'],
+            ['name' => 'mobile_api', 'api' => 'price_mobile_api', 'func' => 'getProductInfoFromMobile', 'label' => '移动端API'],
+            ['name' => 'public_api', 'api' => 'price_public_api', 'func' => 'getProductInfoFromPublicApi', 'label' => '公开API'],
         ];
         
         $methodErrors = [];
         
         // 按顺序尝试获取
         foreach ($methods as $method) {
+            // === 反爬增强：检查接口是否被降级 ===
+            if ($this->isApiDegraded($method['api'])) {
+                $methodErrors[$method['name']] = 'degraded';
+                continue;
+            }
+
             $result['status'] = 'trying_' . $method['name'];
             
             $startTime = microtime(true);
             $data = $this->{$method['func']}($skuId);
             $elapsed = round((microtime(true) - $startTime) * 1000);
+
+            // 记录接口调用结果（用于降级）
+            $apiSuccess = $data && !(isset($data['risk_blocked']) && $data['risk_blocked']);
+            $this->recordApiResult($method['api'], $apiSuccess);
             
             if (!$data) {
                 $methodErrors[$method['name']] = 'no_response';
@@ -505,6 +643,11 @@ class JdPrice {
                 $result['original_price'] = $data['original_price'];
             }
             
+            // 填充PLUS专享会员价
+            if (($result['plus_price'] ?? 0) <= 1 && ($data['plus_price'] ?? 0) > 1) {
+                $result['plus_price'] = $data['plus_price'];
+            }
+            
             // 填充库存状态
             if ($result['stock_status'] === 'unknown' && !empty($data['stock_status']) && $data['stock_status'] !== 'unknown') {
                 $result['stock_status'] = $data['stock_status'];
@@ -528,6 +671,9 @@ class JdPrice {
             if ($result['original_price'] <= 1 && ($pcData['original_price'] ?? 0) > 1) {
                 $result['original_price'] = $pcData['original_price'];
             }
+            if ($result['plus_price'] <= 1 && ($pcData['plus_price'] ?? 0) > 1) {
+                $result['plus_price'] = $pcData['plus_price'];
+            }
         }
         
         // 如果原价小于到手价，说明原价获取失败
@@ -538,6 +684,11 @@ class JdPrice {
         // 如果还是没有原价，使用到手价作为原价
         if ($result['original_price'] <= 0 && $result['price'] > 0) {
             $result['original_price'] = $result['price'];
+        }
+        
+        // PLUS专享价必须低于到手价，否则视为无效
+        if ($result['plus_price'] > 0 && $result['price'] > 0 && $result['plus_price'] >= $result['price']) {
+            $result['plus_price'] = 0;
         }
         
         // 设置最终状态和错误信息
@@ -554,6 +705,9 @@ class JdPrice {
             } elseif (in_array('network_timeout', $methodErrors)) {
                 $result['error_type'] = 'network_timeout';
                 $result['error_message'] = $this->errorTypes['network_timeout'];
+            } elseif (in_array('degraded', $methodErrors) && count($methodErrors) == count($methods)) {
+                $result['error_type'] = 'risk_blocked';
+                $result['error_message'] = '所有价格接口已临时降级，请稍后重试';
             } elseif (empty($result['name']) && $result['price'] <= 0) {
                 $result['error_type'] = 'product_offline';
                 $result['error_message'] = $this->errorTypes['product_offline'];
@@ -572,62 +726,6 @@ class JdPrice {
     public function getProductImage($skuId) {
         $data = $this->getImageFromPcPage($skuId);
         return $data['image_url'] ?? '';
-    }
-    
-    /**
-     * 获取商品到手价（实际购买价格）
-     */
-    public function getFinalPrice($skuId) {
-        // 尝试获取促销价格
-        $promoPrice = $this->getPromoPrice($skuId);
-        if ($promoPrice > 0) {
-            return $promoPrice;
-        }
-        
-        // 回退到普通价格
-        return $this->getPrice($skuId);
-    }
-    
-    /**
-     * 获取促销价格
-     */
-    private function getPromoPrice($skuId) {
-        // 尝试从促销API获取
-        $url = "https://api.m.jd.com/client.action?functionId=pc_detail_promo&appid=pc_detail&body=" . urlencode(json_encode(['skuId' => $skuId, 'area' => '1_72_2799_0']));
-        
-        $headers = [
-            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer: https://item.jd.com/',
-            'Accept: application/json',
-        ];
-        
-        if (!empty($this->cookies)) {
-            $headers[] = 'Cookie: ' . $this->cookies;
-        }
-        
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_TIMEOUT => 15,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_ENCODING => 'gzip',
-        ]);
-        
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-        
-        if ($httpCode == 200 && $response) {
-            $data = json_decode($response, true);
-            // 提取促销价格
-            if (isset($data['promoPrice'])) {
-                return floatval($data['promoPrice']);
-            }
-        }
-        
-        return 0;
     }
     
     /**
@@ -659,7 +757,7 @@ class JdPrice {
             CURLOPT_ENCODING => 'gzip, deflate',
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
         
@@ -685,11 +783,22 @@ class JdPrice {
                     $originalPrice = $jdPrice;
                 }
                 
+                // 提取PLUS专享会员价
+                $plusPrice = floatval(
+                    $wareInfo['plusPrice']
+                    ?? $wareInfo['plus_price']
+                    ?? $wareInfo['pPrice']
+                    ?? $wareInfo['pprice']
+                    ?? 0
+                );
+                if ($plusPrice <= 1) $plusPrice = 0;
+                
                 return [
                     'name' => $wareInfo['wname'] ?? '',
                     'image_url' => isset($wareInfo['imageurl']) ? 'https:' . $wareInfo['imageurl'] : '',
                     'price' => $price,
                     'original_price' => $originalPrice,
+                    'plus_price' => $plusPrice,
                     'stock_status' => $this->parseStockStatus($wareInfo['StockState'] ?? 0),
                     'stock_num' => $wareInfo['stockNum'] ?? $wareInfo['StockNum'] ?? null,
                     'source' => 'mobile_api'
@@ -734,7 +843,7 @@ class JdPrice {
                 CURLOPT_MAXREDIRS => 5,
             ]);
             
-            $response = curl_exec($ch);
+            $response = $this->execWithCookieCapture($ch);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
             curl_close($ch);
@@ -823,6 +932,21 @@ class JdPrice {
                 $originalPrice = $jdPrice;
             }
             
+            // 提取PLUS专享会员价
+            $plusPrice = 0;
+            if (preg_match('/"plusPrice"\s*:\s*"?(\d+\.?\d*)"?/i', $response, $matches)) {
+                $val = floatval($matches[1]);
+                if ($val > 1) $plusPrice = $val;
+            }
+            if ($plusPrice <= 1 && preg_match('/"plus_price"\s*:\s*"?(\d+\.?\d*)"?/i', $response, $matches)) {
+                $val = floatval($matches[1]);
+                if ($val > 1) $plusPrice = $val;
+            }
+            if ($plusPrice <= 1 && preg_match('/"pPrice"\s*:\s*"?(\d+\.?\d*)"?/i', $response, $matches)) {
+                $val = floatval($matches[1]);
+                if ($val > 1) $plusPrice = $val;
+            }
+            
             // 提取库存状态
             $stockStatus = 'unknown';
             $stockNum = null;
@@ -845,6 +969,7 @@ class JdPrice {
                     'image_url' => $image,
                     'price' => $price,
                     'original_price' => $originalPrice,
+                    'plus_price' => $plusPrice,
                     'stock_status' => $stockStatus,
                     'stock_num' => $stockNum,
                     'source' => 'mobile_page'
@@ -891,6 +1016,8 @@ class JdPrice {
             'name' => "商品 {$skuId}",
             'image_url' => '',
             'price' => $price,
+            'original_price' => 0,
+            'plus_price' => 0,
             'stock_status' => 'unknown',
             'source' => 'public_api'
         ];
@@ -922,13 +1049,23 @@ class JdPrice {
             CURLOPT_ENCODING => 'gzip, deflate, br',
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         curl_close($ch);
         
-        $result = ['image_url' => '', 'original_price' => 0];
+        $result = ['image_url' => '', 'original_price' => 0, 'plus_price' => 0];
         
         if (!$response) {
             return $result;
+        }
+        
+        // 提取PLUS专享会员价
+        if (preg_match('/"plusPrice"\s*:\s*"?(\d+\.?\d*)"?/i', $response, $matches)) {
+            $val = floatval($matches[1]);
+            if ($val > 1) $result['plus_price'] = $val;
+        }
+        if ($result['plus_price'] <= 1 && preg_match('/"pPrice"\s*:\s*"?(\d+\.?\d*)"?/i', $response, $matches)) {
+            $val = floatval($matches[1]);
+            if ($val > 1) $result['plus_price'] = $val;
         }
         
         // 提取原价 - 从imageList字段所在行提取价格信息
@@ -1127,7 +1264,7 @@ class JdPrice {
             CURLOPT_ENCODING => 'gzip, deflate, br',
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         curl_close($ch);
         
         if ($response) {
@@ -1174,7 +1311,7 @@ class JdPrice {
             CURLOPT_MAXREDIRS => 3,
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
         curl_close($ch);
         
@@ -1228,7 +1365,7 @@ class JdPrice {
             CURLOPT_SSL_VERIFYPEER => false,
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         curl_close($ch);
         
         if ($response) {
@@ -1351,7 +1488,7 @@ class JdPrice {
                 CURLOPT_FOLLOWLOCATION => true,
             ]);
             
-            $response = curl_exec($ch);
+            $response = $this->execWithCookieCapture($ch);
             $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             $error = curl_error($ch);
             curl_close($ch);
@@ -1410,7 +1547,7 @@ class JdPrice {
             CURLOPT_SSL_VERIFYPEER => false,
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
         
@@ -1449,7 +1586,7 @@ class JdPrice {
             CURLOPT_SSL_VERIFYPEER => false,
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
         
@@ -1502,7 +1639,7 @@ class JdPrice {
             CURLOPT_SSL_VERIFYPEER => false,
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
         
@@ -1548,7 +1685,7 @@ class JdPrice {
             CURLOPT_MAXREDIRS => 5,
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
         curl_close($ch);
@@ -1629,7 +1766,7 @@ class JdPrice {
             CURLOPT_ENCODING => 'gzip, deflate',
         ]);
         
-        $response = curl_exec($ch);
+        $response = $this->execWithCookieCapture($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
         
@@ -1656,6 +1793,27 @@ class JdPrice {
                     $plusExpireTime = $userInfo['plusExpireTime'];
                 }
                 
+                // 成长值具体数值
+                $growthValue = intval(
+                    $baseInfo['growthValue']
+                    ?? $baseInfo['userGrowthValue']
+                    ?? $baseInfo['growth']
+                    ?? $userInfo['growthValue']
+                    ?? $userInfo['userGrowthValue']
+                    ?? 0
+                );
+                
+                // 京享值
+                $jdShareScore = intval(
+                    $data['data']['jdShareScore']
+                    ?? $baseInfo['jdShareScore']
+                    ?? $userInfo['jdShareScore']
+                    ?? $data['data']['shareScore']
+                    ?? $baseInfo['shareScore']
+                    ?? $userInfo['shareScore']
+                    ?? 0
+                );
+                
                 return [
                     'nickname' => $baseInfo['nickname'] ?? '',
                     'levelName' => $baseInfo['levelName'] ?? '',
@@ -1664,58 +1822,13 @@ class JdPrice {
                     'userLevel' => $baseInfo['userLevel'] ?? '0',
                     'headImage' => $baseInfo['headImageUrl'] ?? '',
                     'beanNum' => $beanNum,
+                    'growthValue' => $growthValue,
+                    'jdShareScore' => $jdShareScore,
                 ];
             }
         }
         
         return null;
-    }
-    
-    /**
-     * 检查Cookie是否有效
-     */
-    public function checkCookie() {
-        if (empty($this->cookies)) {
-            return false;
-        }
-        
-        // 尝试访问需要登录的页面
-        $url = 'https://me-api.jd.com/user_new/info/GetJDUserInfoUnion';
-        
-        $headers = [
-            'User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
-            'Accept: application/json',
-            'Referer: https://m.jd.com/',
-        ];
-        
-        if (!empty($this->cookies)) {
-            $headers[] = 'Cookie: ' . $this->cookies;
-        }
-        
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_TIMEOUT => 10,
-            CURLOPT_SSL_VERIFYPEER => false,
-        ]);
-        
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-        
-        if ($httpCode == 200 && $response) {
-            $data = json_decode($response, true);
-            // 检查返回的用户信息
-            if (isset($data['retcode']) && $data['retcode'] == '0') {
-                return true;
-            }
-        }
-        
-        // 备用检测方法：尝试获取商品价格
-        $testPrice = $this->getPrice('100008348542');
-        return $testPrice > 0;
     }
     
     /**

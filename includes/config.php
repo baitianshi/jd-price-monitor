@@ -172,17 +172,9 @@ function get_client_ip() {
 }
 
 /**
- * 获取登录限流键
- */
-function get_login_rate_limit_key() {
-    return 'login_attempts_' . get_client_ip();
-}
-
-/**
  * 检查登录是否被锁定
  */
 function is_login_locked($db) {
-    $key = get_login_rate_limit_key();
     $result = $db->fetch(
         "SELECT attempts, lockout_until FROM login_attempts WHERE ip_address = ?",
         [get_client_ip()]

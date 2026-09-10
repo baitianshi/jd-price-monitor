@@ -244,22 +244,39 @@ class Webhook {
      * 格式化消息
      */
     private function formatMessage($type, $data) {
-        $product = $data['product'] ?? [];
+        // 统一补齐 product 默认值，避免 Undefined index
+        $product = array_merge([
+            'name' => '未知商品',
+            'sku_id' => '',
+            'current_price' => 0,
+            'original_price' => 0,
+            'target_price' => 0,
+            'lowest_price' => 0,
+            'old_price' => 0,
+            'url' => 'https://www.jd.com',
+            'created_at' => ''
+        ], $data['product'] ?? []);
+
+        $oldPrice = $data['old_price'] ?? $product['old_price'] ?? 0;
+        $surgeAmount = $data['surge_amount'] ?? 0;
+        $surgePercent = $data['surge_percent'] ?? 0;
+        $originalPrice = $product['original_price'] ?: $product['current_price'];
+
         $templates = [
             'price_drop' => [
                 'title' => '🎉 降价提醒',
                 'text' => "**{$product['name']}**\n\n" .
                          "💰 当前价格：¥{$product['current_price']}\n" .
-                         "📋 商品原价：¥" . ($product['original_price'] ?? $product['current_price']) . "\n" .
+                         "📋 商品原价：¥{$originalPrice}\n" .
                          "🎯 目标价格：¥{$product['target_price']}\n" .
-                         "📉 降价幅度：¥" . ($product['old_price'] - $product['current_price']) . "\n\n" .
+                         "📉 降价幅度：¥" . ($oldPrice - $product['current_price']) . "\n\n" .
                          "[点击查看商品]({$product['url']})"
             ],
             'price_update' => [
                 'title' => '📊 价格更新',
                 'text' => "**{$product['name']}**\n\n" .
                          "💰 当前价格：¥{$product['current_price']}\n" .
-                         "📋 商品原价：¥" . ($product['original_price'] ?? $product['current_price']) . "\n" .
+                         "📋 商品原价：¥{$originalPrice}\n" .
                          "📈 历史最低：¥{$product['lowest_price']}\n" .
                          "📊 监控时长：" . $this->formatDuration($product['created_at']) . "\n\n" .
                          "[点击查看商品]({$product['url']})"
@@ -268,7 +285,7 @@ class Webhook {
                 'title' => '🏆 历史最低价',
                 'text' => "**{$product['name']}**\n\n" .
                          "💰 当前价格：¥{$product['current_price']}\n" .
-                         "📋 商品原价：¥" . ($product['original_price'] ?? $product['current_price']) . "\n" .
+                         "📋 商品原价：¥{$originalPrice}\n" .
                          "📉 创历史新低！\n\n" .
                          "[点击查看商品]({$product['url']})"
             ],
@@ -276,15 +293,15 @@ class Webhook {
                 'title' => '📈 价格上涨',
                 'text' => "**{$product['name']}**\n\n" .
                          "💰 当前价格：¥{$product['current_price']}\n" .
-                         "📋 商品原价：¥" . ($product['original_price'] ?? $product['current_price']) . "\n" .
-                         "📉 之前价格：¥{$data['old_price']}\n" .
-                         "📈 涨幅：¥{$data['surge_amount']} (↑{$data['surge_percent']}%)\n\n" .
+                         "📋 商品原价：¥{$originalPrice}\n" .
+                         "📉 之前价格：¥{$oldPrice}\n" .
+                         "📈 涨幅：¥{$surgeAmount} (↑{$surgePercent}%)\n\n" .
                          "[点击查看商品]({$product['url']})"
             ],
             'out_of_stock' => [
                 'title' => '📦 商品无货',
                 'text' => "**{$product['name']}**\n\n" .
-                         "📋 商品原价：¥" . ($product['original_price'] ?? $product['current_price']) . "\n" .
+                         "📋 商品原价：¥{$originalPrice}\n" .
                          "当前库存状态：无货\n\n" .
                          "[点击查看商品]({$product['url']})"
             ],
@@ -292,7 +309,7 @@ class Webhook {
                 'title' => '✅ 商品有货',
                 'text' => "**{$product['name']}**\n\n" .
                          "💰 当前价格：¥{$product['current_price']}\n" .
-                         "📋 商品原价：¥" . ($product['original_price'] ?? $product['current_price']) . "\n" .
+                         "📋 商品原价：¥{$originalPrice}\n" .
                          "商品已补货！\n\n" .
                          "[点击查看商品]({$product['url']})"
             ],
@@ -321,9 +338,15 @@ class Webhook {
                          "退款金额：¥" . ($data['total_refund'] ?? 0) . "\n" .
                          ($data['message'] ?? '') . "\n\n" .
                          "详情请查看价保日志"
+            ],
+            'test' => [
+                'title' => '🔔 测试通知',
+                'text' => "这是一条测试消息\n\n" .
+                         "发送时间：" . date('Y-m-d H:i:s') . "\n\n" .
+                         "如果您收到此消息，说明Webhook配置正确。"
             ]
         ];
-        
+
         return $templates[$type] ?? ['title' => '通知', 'text' => ''];
     }
     
@@ -369,26 +392,6 @@ class Webhook {
             "INSERT INTO notification_logs (product_id, type, message, webhook_url, success, sent_at) VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))",
             [$productId, $type, $message, $webhookUrl, $success ? 1 : 0]
         );
-    }
-    
-    /**
-     * 测试Webhook
-     */
-    public function test($url) {
-        $message = [
-            'title' => '🔔 京东价格监控 - 测试通知',
-            'text' => "这是一条测试消息\n\n" .
-                     "发送时间：" . date('Y-m-d H:i:s') . "\n\n" .
-                     "如果您收到此消息，说明Webhook配置正确。"
-        ];
-        
-        $webhook = [
-            'url' => $url,
-            'name' => '测试',
-            'format' => 'markdown'
-        ];
-        
-        return $this->sendToWebhook($webhook, $message, 'test', []);
     }
     
     /**

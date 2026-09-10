@@ -6,11 +6,8 @@ function createSettingsModule() {
         showSettings: false,
         showCookieHelper: false,
         showMethodStats: false,
-        showQrLogin: false,
-        qrcodeImage: '',
-        qrStatus: 'loading', // loading, waiting, scanned, confirmed, expired, error
-        qrMessage: '',
-        qrPollTimer: null,
+        userInfoExpanded: false,
+        cookieRaw: '',
         
         settingsForm: {
             jd_cookies: '',
@@ -178,135 +175,89 @@ function createSettingsModule() {
             }
         },
         
-        // ========== 扫码登录相关方法 ==========
+        // ========== 会员信息相关方法 ==========
         
-        openQrLogin() {
-            this.showQrLogin = true;
-            this.qrStatus = 'loading';
-            this.qrMessage = '正在获取二维码...';
-            this.qrcodeImage = '';
-            this.getQrCode();
-        },
-        
-        closeQrLogin() {
-            this.showQrLogin = false;
-            if (this.qrPollTimer) {
-                clearInterval(this.qrPollTimer);
-                this.qrPollTimer = null;
-            }
-        },
-        
-        async getQrCode() {
-            try {
-                const res = await fetch(BASE_PATH + '/api/jd-qrcode.php?action=get_qrcode');
-                const data = await res.json();
-                
-                if (data.success) {
-                    this.qrcodeImage = data.data.qrcode;
-                    this.qrStatus = 'waiting';
-                    this.qrMessage = '请使用京东APP扫描二维码';
-                    this.startQrPolling();
-                } else {
-                    this.qrStatus = 'error';
-                    this.qrMessage = data.message || '获取二维码失败';
+        jdLevelInfo() {
+            const u = this.settings.jd_user;
+            if (!u) return null;
+            
+            const name = u.levelName || '';
+            const growth = Number(u.growthValue || 0);
+            
+            const tiers = [
+                { key: 'registered', label: '注册会员', min: 0, icon: 'user', color: '#9CA3AF', bg: '#F3F4F6' },
+                { key: 'bronze', label: '铜牌会员', min: 1000, icon: 'medal', color: '#B45309', bg: '#FEF3C7' },
+                { key: 'silver', label: '银牌会员', min: 3000, icon: 'medal', color: '#6B7280', bg: '#F3F4F6' },
+                { key: 'gold', label: '金牌会员', min: 10000, icon: 'award', color: '#D97706', bg: '#FEF3C7' },
+                { key: 'diamond', label: '钻石会员', min: 40000, icon: 'gem', color: '#2563EB', bg: '#DBEAFE' },
+                { key: 'crown', label: '皇冠会员', min: 100000, icon: 'crown', color: '#9333EA', bg: '#F3E8FF' }
+            ];
+            
+            let current = tiers.find(t => name.includes(t.label)) || null;
+            if (!current) {
+                for (let i = tiers.length - 1; i >= 0; i--) {
+                    if (growth >= tiers[i].min) { current = tiers[i]; break; }
                 }
-            } catch (e) {
-                this.qrStatus = 'error';
-                this.qrMessage = '网络错误，请重试';
-            }
-        },
-        
-        startQrPolling() {
-            if (this.qrPollTimer) {
-                clearInterval(this.qrPollTimer);
+                current = current || tiers[0];
             }
             
-            let pollCount = 0;
-            const maxPolls = 90; // 最多轮询90次（约3分钟）
+            const idx = tiers.indexOf(current);
+            const next = idx < tiers.length - 1 ? tiers[idx + 1] : null;
+            let progress = 100;
+            if (next) {
+                progress = Math.min(100, Math.max(0, ((growth - current.min) / (next.min - current.min)) * 100));
+            }
             
-            this.qrPollTimer = setInterval(async () => {
-                pollCount++;
-                
-                if (pollCount > maxPolls) {
-                    clearInterval(this.qrPollTimer);
-                    this.qrPollTimer = null;
-                    this.qrStatus = 'expired';
-                    this.qrMessage = '二维码已过期，请点击刷新';
-                    return;
-                }
-                
-                try {
-                    const res = await fetch(BASE_PATH + '/api/jd-qrcode.php?action=check_status');
-                    const data = await res.json();
-                    
-                    if (data.success) {
-                        const status = data.data.status;
-                        
-                        switch (status) {
-                            case 'waiting':
-                                // 等待扫描，继续轮询
-                                break;
-                            case 'scanned':
-                                this.qrStatus = 'scanned';
-                                this.qrMessage = '扫描成功，请在手机上确认登录';
-                                break;
-                            case 'confirmed':
-                                clearInterval(this.qrPollTimer);
-                                this.qrPollTimer = null;
-                                this.qrStatus = 'confirmed';
-                                this.qrMessage = '登录成功，正在获取Cookie...';
-                                await this.verifyQrTicket();
-                                break;
-                            case 'expired':
-                                clearInterval(this.qrPollTimer);
-                                this.qrPollTimer = null;
-                                this.qrStatus = 'expired';
-                                this.qrMessage = '二维码已过期，请点击刷新';
-                                break;
-                            default:
-                                this.qrMessage = data.data.message || '状态未知';
-                        }
-                    }
-                } catch (e) {
-                    console.error('轮询扫码状态失败', e);
-                }
-            }, 2000); // 每2秒轮询一次
+            return {
+                current,
+                next,
+                growth,
+                progress: Math.round(progress)
+            };
         },
         
-        async verifyQrTicket() {
-            try {
-                const res = await fetch(BASE_PATH + '/api/jd-qrcode.php?action=verify_ticket', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({})
-                });
-                const data = await res.json();
-                
-                if (data.success) {
-                    this.qrMessage = '登录成功！正在刷新设置...';
-                    this.showToast('京东登录成功：' + (data.data.username || ''), 'success');
-                    
-                    // 关闭弹窗并刷新设置
-                    setTimeout(() => {
-                        this.closeQrLogin();
-                        this.loadSettings();
-                    }, 1000);
-                } else {
-                    this.qrStatus = 'error';
-                    this.qrMessage = data.message || '验证登录失败';
-                }
-            } catch (e) {
-                this.qrStatus = 'error';
-                this.qrMessage = '验证登录失败，请重试或手动输入Cookie';
+        jdShareScoreInfo() {
+            const s = Number(this.settings.jd_user?.jdShareScore || 0);
+            let label = '暂无数据';
+            let color = '#9CA3AF';
+            
+            if (s >= 9000) { label = '顶尖'; color = '#9333EA'; }
+            else if (s >= 6000) { label = '卓越'; color = '#2563EB'; }
+            else if (s >= 4000) { label = '优秀'; color = '#16A34A'; }
+            else if (s >= 2000) { label = '良好'; color = '#D97706'; }
+            else if (s >= 500) { label = '一般'; color = '#6B7280'; }
+            else if (s >= 200) { label = '入门'; color = '#9CA3AF'; }
+            else if (s > 0) { label = '基础'; color = '#9CA3AF'; }
+            
+            return { score: s, label, color };
+        },
+        
+        toggleUserInfo() {
+            this.userInfoExpanded = !this.userInfoExpanded;
+            if (this.userInfoExpanded) {
+                setTimeout(() => { if (window.lucide) lucide.createIcons(); }, 0);
             }
         },
         
-        refreshQrCode() {
-            if (this.qrPollTimer) {
-                clearInterval(this.qrPollTimer);
-                this.qrPollTimer = null;
+        parseCookie() {
+            const raw = (this.cookieRaw || '').trim();
+            if (!raw) {
+                this.showToast('请先粘贴完整Cookie字符串', 'error');
+                return;
             }
-            this.getQrCode();
+            const ptKeyMatch = raw.match(/pt_key=([^;]+)/);
+            const ptPinMatch = raw.match(/pt_pin=([^;]+)/);
+            if (ptKeyMatch) {
+                this.settingsForm.pt_key = ptKeyMatch[1].trim();
+            }
+            if (ptPinMatch) {
+                this.settingsForm.pt_pin = ptPinMatch[1].trim();
+            }
+            if (!ptKeyMatch && !ptPinMatch) {
+                this.showToast('未在Cookie中找到pt_key/pt_pin，请确认复制的是登录后的完整Cookie', 'error');
+                return;
+            }
+            this.showToast('已自动解析并回填pt_key/pt_pin，点击「保存设置」即可生效', 'success');
         }
     };
 }

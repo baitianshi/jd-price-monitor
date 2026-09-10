@@ -10,11 +10,21 @@ class Auth {
     
     public function __construct() {
         $this->db = Database::getInstance();
-        
+
+        // headers 已发送时跳过 session 配置，避免 "headers already sent" 警告
+        // （通常由前置输出、BOM 或 CLI 模式引起；session 功能会降级但不致命）
+        if (headers_sent()) {
+            return;
+        }
+
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            return;
+        }
+
         // 配置安全的Session Cookie
-        $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || 
+        $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ||
                    (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
-        
+
         // 设置Session Cookie参数
         session_set_cookie_params([
             'lifetime' => SESSION_LIFETIME,
@@ -24,7 +34,7 @@ class Auth {
             'httponly' => true,    // 防止JavaScript访问
             'samesite' => 'Strict' // 防止CSRF
         ]);
-        
+
         session_name(SESSION_NAME);
         session_start();
     }

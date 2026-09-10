@@ -8,6 +8,317 @@
 
 ---
 
+## v2.5.2 - 2026-09-10
+
+### 移除扫码登录，改为手动输入 Cookie（含一键复制书签）
+
+**【功能变更记录】**
+
+京东扫码登录（`api/jd-qrcode.php`）在纯 PHP 后端下无法稳定获取有效 Cookie：京东在「确认登录」一步持续返回 `errcode=264`（风控拦截），多次修复（移动端流程、Cookie 隔离、state/returnurl 一致性）均无法根治。同时调研确认短信验证码登录同样依赖浏览器 JS 生成的设备指纹（FingerprintJS2）与私有 AES 参数（`risk_jd[fp]`/`jstub`/`ct`/`tk`），纯 PHP 亦无法实现。故彻底移除扫码登录，保留并增强手动输入。
+
+**变更内容：**
+
+| 文件 | 变更 |
+|------|------|
+| `api/jd-qrcode.php` | 删除整个文件（扫码登录后端） |
+| `assets/js/modules/settings.js` | 删除扫码状态与全部扫码方法（openQrLogin/closeQrLogin/getQrCode/startQrPolling/verifyQrTicket/refreshQrCode）；新增 `parseCookie()` 与 `cookieRaw` 状态 |
+| `index.php` | 删除「扫码登录」按钮与扫码弹窗；新增「快速回填」输入框（粘贴完整 Cookie 一键解析）；Cookie 助手中新增「一键复制 Cookie」书签脚本 |
+
+**【技术难点与解决方案】**
+
+**难点：扫码/短信登录均被京东风控拦截，纯 PHP 无法绕过**
+
+- 扫码：移动端流程 `tmauthchecktoken` 在确认登录时返回 `errcode=264`，即使修正 state/returnurl 一致性（二维码存活从 4-5 次轮询延长至 10-14 次）后仍在确认步被拒。
+- 短信：`jcapsid` 依赖 FingerprintJS2 `x64hash128` 设备指纹，`risk_jd[jstub]`/`ct`/`tk` 依赖京东私有 AES，纯 PHP 后端无法生成（与扫码 264 为同一类风控根因）。
+
+**方案：** 彻底移除后端对接登录，改为「用户在真实浏览器登录 → 一键复制完整 Cookie → 粘贴解析回填 pt_key/pt_pin」的离线回填方案。
+
+**【错误陷阱及规避方法】**
+
+- **陷阱：** 书签脚本在非登录状态下点击会复制到空字符串。
+- **规避：** 脚本内先判空 `document.cookie`，为空时弹窗提示「请先登录京东」。
+- **陷阱：** 部分浏览器禁止拖拽 `javascript:` 书签或拦截剪贴板写入。
+- **规避：** 使用 `document.execCommand('copy')` 兜底（点击书签属于用户手势，可正常复制）；无法拖拽时可手动新建书签。
+
+**【使用说明与注意事项】**
+
+1. 打开浏览器访问 m.jd.com 并登录账号。
+2. 点击「一键复制 Cookie」书签（或 F12 → Application → Cookies 手动复制 pt_key/pt_pin）。
+3. 回到系统设置页，将完整 Cookie 粘贴到「快速回填」框，点击「解析回填」。
+4. 确认 pt_key/pt_pin 已回填后点击「保存设置」。
+
+- 也可直接手动填写 pt_key、pt_pin 两个字段（系统会自动组合）。
+- Cookie 有效期通常 1-3 个月，失效后需重新获取。
+
+---
+
+## v2.5.1 - 2026-09-09
+
+### 死代码清理：删除无用方法与资源
+
+**【功能变更记录】**
+
+对全项目进行死代码/无用代码清理，删除未被任何调用方引用的方法、常量、函数与文件，功能行为保持不变。
+
+**删除内容：**
+
+| 文件 | 删除内容 |
+|------|----------|
+| `includes/jd.php` | 常量 `M_JD_REFERER`；方法 `getDegradationStatus()`、`checkCookieValid()`、`getFinalPrice()`、`getPromoPrice()`、文件末尾旧版 `checkCookie()` |
+| `includes/jd_antiban.php` | `JdDeviceFingerprint::getSecChUaHeaders()`；`JdCookieJar::getAllCookiesFlat()`；`JdBehaviorSimulator::simulateBrowse()`；`JdApiDegradation::getAllStatus()`、`getRemainingTime()` |
+| `includes/webhook.php` | `Webhook::test($url)` |
+| `includes/db.php` | `getPdo()`、`beginTransaction()`、`commit()`、`rollBack()` |
+| `includes/config.php` | 函数 `get_login_rate_limit_key()`；`is_login_locked()` 中的无用变量 `$key` |
+| `cron.zip` | 删除整个文件（git 备份归档，非运行资源） |
+
+**保留说明：**
+- `MOBILE_USER_AGENT` / `PC_USER_AGENT` 常量仍被子方法与 `makeRequest()` 引用，保留
+- `lastInsertId()` 被 `api/products.php`、`api/tags.php` 使用，保留
+- `makeRequest()` 被 `randomBrowseCart()` 内部引用，保留
+- `execWithCookieCapture()` 为 Cookie 自动捕获核心方法，保留
+- 登录限流相关函数（`is_login_locked`、`record_login_failure`、`get_client_ip`、`clear_login_failures`）保留
+- `JdApiDegradation` 保留 `isAvailable()` / `recordSuccess()` / `recordFailure()` / `resetDegradation()`，接口降级功能不受影响
+
+**【技术难点与解决方案】**
+
+**难点：删除前如何确认方法确为死代码**
+- 问题：直接删除可能误删被动态调用或间接引用的方法，导致运行时 Fatal Error
+- 方案：先通过全局 grep 建立符号依赖图，逐一确认每个候选方法无任何调用方后再删除；删除后对全部 PHP 文件执行 `php -l` 语法检查，并用 `php -S` 内置服务器做 HTTP 冒烟测试验证核心接口（首页、认证检查、价格历史、网络检查）均返回 200
+
+**【错误陷阱及规避方法】**
+
+1. **删除方法时勿误删类结束大括号**：删除 `getSecChUaHeaders()` 时曾连带删掉 `JdDeviceFingerprint` 类的结束大括号，导致 `php -l` 报 `unexpected 'class' (T_CLASS)`。删除方法后必须立即执行 `php -l` 验证语法
+2. **历史变更记录不得改动**：CHANGES.md 中 v2.3.0 等历史章节记录的方法列表（含已删除方法）属历史事实，保持原样
+
+**【使用说明与注意事项】**
+
+- 本次为纯删除变更，无新增配置项，数据库结构不变，覆盖相关文件即可
+- 升级后建议执行一次完整刷新验证（首页、查价、历史记录、网络检查）
+
+---
+
+## v2.5.0 - 2026-09-09
+
+### 反爬增强：设备指纹 + Cookie分域 + TLS模拟 + 行为多样性 + 接口降级
+
+**【功能变更记录】**
+
+**1. 新增反爬增强模块 `includes/jd_antiban.php`**
+
+新增 5 个核心类，完整覆盖京东反爬风控的各个层面：
+
+| 类名 | 功能 | 关键参数 |
+|------|------|----------|
+| `JdDeviceFingerprint` | 稳定设备指纹生成器（MacBook Pro 14" M1 Pro） | UA、屏幕、时区、硬件、WebGL、字体、Canvas指纹等 |
+| `JdCookieJar` | Cookie 分域存储管理器 | `.jd.com` / `.3.cn` 域严格隔离，自动合并 Set-Cookie |
+| `JdRequestForgery` | 请求伪造器（TLS指纹 + Header顺序） | Chrome风格加密套件顺序、sec-ch-ua 在前的Header排序 |
+| `JdBehaviorSimulator` | 行为多样性模拟器 | 前置商品页访问、30%概率查库存、20%概率查评价 |
+| `JdApiDegradation` | 接口降级管理器 | 连续失败3次自动降级，1小时后自动恢复 |
+
+**设备指纹特点：**
+- 固定 MacBook Pro 14寸（M1 Pro / 16GB / 10核）配置
+- 生成后持久化到 `system_settings` 表，永久稳定，不会每次变化
+- 自动生成京东专属设备Cookie：`__jda`、`__jdb`、`__jdc`、`__jdu`、`guid`、`_t`
+
+**Cookie分域特点：**
+- `.jd.com` 与 `.3.cn` 域的Cookie严格隔离，模拟真实浏览器行为
+- 自动从响应的 `Set-Cookie` 头中提取并合并Cookie
+- 登录态Cookie（pt_key/pt_pin等）变化时自动同步到 settings 表
+
+**TLS指纹模拟：**
+- 通过 `CURLOPT_SSL_CIPHER_LIST` 设置 Chrome 125 风格的加密套件顺序
+- 启用 ALPN/NPN 扩展（HTTP/2 + HTTP/1.1）
+- 模拟 Chrome 的 sec-ch-ua → UA → Accept → sec-fetch → Accept-Language → Cookie Header 顺序
+
+**行为多样性：**
+- 价格接口调用前 **必须** 先访问商品详情页（item.jd.com 或 item.m.jd.com）
+- 30% 概率附加库存查询（`c0.3.cn/stock`）
+- 20% 概率附加评价查询（`club.jd.com/comment`）
+- 模拟页面停留时间（100-300ms 加速模式）
+
+**接口降级：**
+- 每个价格接口独立统计失败次数
+- 连续失败 3 次自动降级，1 小时后自动恢复
+- 降级期间跳过该接口，避免死磕触发风控升级
+- 降级状态持久化于 `api_degradation` 表，各接口查询前由 `JdApiDegradation::isAvailable()` 自动判断
+
+**修改文件：**
+- 新增 `includes/jd_antiban.php` — 反爬增强模块（5个类）
+- 修改 `includes/jd.php` — `JdPrice` 类整合反爬模块，`getProductInfo()` 加入前置页面访问、行为多样性、降级检查
+- 修改 `includes/db.php` — 新增 3 张表：`system_settings`、`domain_cookies`、`api_degradation`
+
+**2. 修复 jd-qrcode.php 函数重复声明导致的 Fatal Error**
+
+`jd-qrcode.php` 自行定义了 `json_success()` 和 `json_error()` 函数，但它引入的 `auth.php` → `config.php` 也定义了同名函数，导致 PHP Fatal Error: `Cannot redeclare json_success()`，前端表现为"网络错误，请重试"。
+
+删除了 `jd-qrcode.php` 中重复的函数定义，改为通过 `config.php` 统一引用，与其他 API 文件保持一致。
+
+**修改文件：**
+- 修改 `api/jd-qrcode.php` — 删除重复的 `json_success()` / `json_error()`，顶部增加 `require_once config.php`
+
+**【技术难点与解决方案】**
+
+**难点1：TLS指纹在 PHP curl 中的模拟程度有限**
+- 问题：PHP curl 的 `CURLOPT_SSL_CIPHER_LIST` 只能控制 TLS 1.2 的加密套件顺序，TLS 1.3 的 ciphersuites 顺序和扩展顺序无法精确控制（底层 OpenSSL 决定），JA3 指纹无法做到和真实浏览器 100% 一致
+- 方案：加密套件顺序是 JA3 指纹中权重最高的部分，配合 Header 顺序模拟和行为模拟，足以规避基础风控。如需要更强的指纹模拟，建议后续改用 Playwright/Puppeteer 方案
+
+**难点2：Cookie 分域与现有单域架构的兼容**
+- 问题：原有系统只有 `settings.jd_cookies` 一个字段存整串 Cookie，无法区分域名
+- 方案：新增 `domain_cookies` 表做分域存储，同时保持向后兼容——`JdPrice` 的 `$cookies` 属性仍同步为 jd.com 域的Cookie字符串，旧代码无需修改
+
+**难点3：前置页面访问可能大幅拖慢价格查询速度**
+- 问题：每个商品查价前都多一次商品页请求，时间翻倍
+- 方案：用 `$preVisitedSkus` 缓存已访问过的SKU，同一个SKU只访问一次；页面停留时间改为 100-300ms 加速模式（生产环境可调整为 1-3 秒更真实）
+
+**【错误陷阱及规避方法】**
+
+1. **函数重复声明**：在新增公共文件（如 jd_antiban.php）时，所有全局函数和类名都必须唯一，禁止与 config.php / auth.php 中已有的重名。命名约定：反爬模块的类都加 `Jd` 前缀（如 `JdDeviceFingerprint`）
+
+2. **TLS 证书验证**：Windows PHP 环境通常缺少 CA 根证书，`CURLOPT_SSL_VERIFYPEER = true` 会导致所有 HTTPS 请求失败。默认设为 `false`，生产环境如有 CA 证书可改为 `true`
+
+3. **降级表不存在**：升级时如数据库已存在，`CREATE TABLE IF NOT EXISTS` 会自动创建新表；但如果 `Database::initTables()` 没有在升级后被调用，需要手动触发一次数据库初始化（访问页面即可）
+
+4. **设备指纹首次生成后不要手动修改**：如果删除 `system_settings` 表中 `device_fingerprint` 记录，下次启动会重新生成一个全新的指纹，相当于换了一台设备，可能触发京东的"新设备登录"风控
+
+**【使用说明与注意事项】**
+
+- **数据库迁移**：升级后首次访问会自动创建 3 张新表，无需手动操作
+- **升级方式**：覆盖 `includes/jd_antiban.php`、`includes/jd.php`、`includes/db.php`、`api/jd-qrcode.php` 即可
+- **回滚方式**：删除 `includes/jd_antiban.php`，还原另外3个文件即可，数据库表不影响旧版本运行
+- **性能影响**：单次价格查询增加约 300-800ms（商品页前置访问 + 可能的库存/评价查询），批量刷新时总耗时约增加 50%
+- **配置调整**：可在 `jd_antiban.php` 中调整以下参数：
+  - `JdBehaviorSimulator::STOCK_CHECK_PROBABILITY` — 库存查询概率（默认0.3）
+  - `JdBehaviorSimulator::COMMENT_CHECK_PROBABILITY` — 评价查询概率（默认0.2）
+  - `JdApiDegradation::FAIL_THRESHOLD` — 降级失败阈值（默认3次）
+  - `JdApiDegradation::DEGRADE_DURATION` — 降级持续时间（默认3600秒）
+
+---
+
+## v2.4.1 - 2026-09-09
+
+### 文档同步修正
+
+**【功能变更记录】**
+
+**1. README.md 补全 plus_price 字段**
+
+`products` 表实际存在 `plus_price REAL DEFAULT 0`（PLUS会员价）字段，`db.php` 建表、`scheduler.php` 读写均有使用，但 README 表结构说明遗漏。本次补全该字段说明。
+
+**修改文件**：
+- `README.md` - products 表结构补充 `plus_price | REAL | PLUS会员价`
+
+**2. scheduler.php 文件头注释修正**
+
+文件头注释第 2 条「检查Cookie状态」原写为 `120-300分钟间隔，精确到秒`，与实际代码 `rand(6 * 60, 12 * 60)` 不符（6-12小时间隔）。修正为与实际逻辑一致的描述。
+
+**修改文件**：
+- `scheduler.php` - 注释从「120-300分钟间隔，精确到秒」改为「6-12小时间隔，精确到分钟」
+
+**【使用说明】**
+
+- 本次仅为文档与注释修正，无功能变更，无需数据库迁移
+- 升级方式：覆盖对应文件即可
+
+---
+
+## v2.4.0 - 2026-09-08
+
+### 行为模拟改造：购物车浏览替代随机逛页面
+
+**【功能变更记录】**
+
+**1. 浏览模拟从「首页随机逛」改为「购物车 + 监控商品」**
+
+原行为模拟从 m.jd.com 首页实时提取商品链接后随机访问 3-5 个页面，并包含分类/秒杀/PLUS 等兜底页面和 30% 概率的深度跳转。这些访问的都是与监控任务无关的页面，且连续逛 category→seckill→plus 的跳跃路径容易被风控识别。
+
+现改为更贴近真实用户的浏览路径：进入移动端购物车 → 随机抽取 1-3 个监控商品，浏览其详情页。去掉了首页抓链接、兜底页面、深度跳转等发散行为，请求更聚焦、次数更少。
+
+**修改文件**：
+- `includes/jd.php` - 删除 `randomBrowseFromMobile()`，新增 `randomBrowseCart($monitorSkus)`
+- `scheduler.php` - `randomBrowseJd()` 改为查询监控商品 SKU 列表后调用 `randomBrowseCart()`
+
+**新方法逻辑**：
+1. 访问移动端购物车 `https://m.jd.com/cart/`
+2. 对监控商品 SKU 列表去重后，随机抽取 1-3 个
+3. 逐个浏览移动端详情页 `https://item.m.jd.com/product/{sku}.html`，每个停留 2-4 秒
+
+**【技术难点与解决方案】**
+
+| 难点 | 说明 | 解决方案 |
+|------|------|----------|
+| 购物车页面可用性 | 移动端购物车 URL 需确认可用 | 实测 `https://m.jd.com/cart/` 返回 200，配合移动端 UA 访问 |
+| 浏览对象需为监控商品 | 原逻辑访问无关商品 | scheduler 查询 `products.status='active'` 的 SKU 列表传入，浏览的都是监控中的商品 |
+| 空监控列表 | 无监控商品时不能凭空浏览 | 仅访问购物车页面，不浏览商品 |
+
+**【错误陷阱及规避方法】**
+
+| 陷阱 | 说明 | 规避方法 |
+|------|------|----------|
+| SKU 重复导致重复浏览 | 同一商品多次加监控会出现重复 SKU | `array_unique` 去重后再抽取 |
+| 非法/空 SKU | 空值会被当作 SKU 生成无效链接 | `array_filter` 过滤空值后 `array_values` 重建索引 |
+| 浏览数量超上限 | 监控商品多时不应对所有商品都访问 | `min(rand(1,3), count($skus))` 限制最多 3 个 |
+
+**【使用说明】**
+
+- 无需任何手动操作，功能自动生效
+- 每次价格检查前自动进入购物车并随机浏览 1-3 个监控商品
+- 未加购的商品不会触发加购（仅浏览详情页），不引入加购接口风控风险
+
+---
+
+## v2.3.0 - 2026-09-08
+
+### Cookie 自动维护功能
+
+**【功能变更记录】**
+
+**1. 自动捕获并持久化响应中的 Set-Cookie**
+
+此前系统所有请求（价格查询、Cookie 检查、用户信息、随机浏览等）均不捕获响应头中的 Set-Cookie，导致京东下发的跟踪 Cookie（如 `__jda`、`thor` 等）和轮换的登录 Cookie 无法回写，Cookie 链长期停滞、逐渐"变薄"，更容易触发风控。
+
+现在所有携带 Cookie 的请求统一通过 `execWithCookieCapture()` 执行，自动解析响应中的 `Set-Cookie` 头并合并回写数据库（`settings.jd_cookies`），实现 Cookie 链的自维护：
+
+**修改文件**：
+- `includes/jd.php` - 新增 3 个辅助方法，16 个请求方法改用 Cookie 捕获执行
+
+**新增辅助方法**：
+- `parseCookieStringToArray()` - 将 Cookie 字符串解析为数组，容错处理（空段、空格、无等号段）
+- `mergeAndPersistCookies()` - 合并捕获的新 Cookie 并持久化；登录关键 Cookie 变化时重置 `cookie_status`，普通跟踪 Cookie 仅更新值
+- `execWithCookieCapture()` - 通过 `CURLOPT_HEADERFUNCTION` 回调捕获 Set-Cookie，不污染响应体
+
+**接入 Cookie 捕获的方法**（16 个）：
+- `makeRequest()`、`checkCookieValid()`、`getPromoPrice()`、`getProductInfoFromMobile()`、`getProductInfoFromMobilePage()`、`getImageFromPcPage()`、`getPriceFromPcPage()`、`getPriceFromMobilePage()`、`getPriceFromMobileApi()`、`checkCookieByUserInfo()`、`checkCookieByMobileLogin()`、`checkCookieByMobilePage()`、`checkCookieByPriceApi()`、`checkCookieByMobileProductPage()`、`getUserInfo()`、`checkCookie()`
+
+**有意不捕获的请求**：
+- `resolveShortUrl()` - 短链接解析，无 Cookie
+- `getProductInfoFromPublicApi()` / `getPriceFromPublicApi()` - p.3.cn 公开 API，无需 Cookie
+
+**【技术难点与解决方案】**
+
+| 难点 | 说明 | 解决方案 |
+|------|------|----------|
+| 捕获头部不污染响应体 | `CURLOPT_HEADER=true` 后需手动分离 header/body，极易破坏现有解析逻辑 | 使用 `CURLOPT_HEADERFUNCTION` 回调逐行接收响应头，响应体保持不变 |
+| cookie_status 重置语义 | 每次变化都重置为 `unknown` 会破坏调度器的"有效→失效"通知逻辑（依赖检查前状态为 valid） | 仅当登录关键 Cookie（`pt_key`/`pt_pin`/`pt_token`/`thor`/`sso_uc`）变化时重置为 `unknown`；普通跟踪 Cookie 变化只更新值 |
+| Cookie 链被误删 | 京东会下发 `deleted`/空值标记的过期间Cookie | 合并时忽略空值与 `deleted` 标记，保护 pt_key/pt_pin 等关键登录状态 |
+| 内存与数据库一致 | 合并后 `$this->cookies` 与数据库可能不同步 | 持久化成功后同步更新内存中的 cookies 字符串 |
+
+**【错误陷阱及规避方法】**
+
+| 陷阱 | 说明 | 规避方法 |
+|------|------|----------|
+| 相同 Cookie 反复写库 | 每次请求都触发 UPDATE，造成无意义写入 | 合并后与当前值比对，无变化直接返回，不写库 |
+| 无 Cookie 时凭空创建 | `$this->cookies` 为空时合并会创造不存在的 Cookie 链 | `mergeAndPersistCookies` 入口增加空 cookies 保护 |
+| 调试模拟服务踩坑 | PHP 内置服务器中 `header()` 默认替换同名头，多个 Set-Cookie 只剩最后一个 | 模拟服务需 `header(..., false)` 允许重复头；真实京东响应不受影响 |
+
+**【使用说明】**
+
+- 无需任何手动操作，功能自动生效
+- 每次京东请求响应中的 Set-Cookie 会自动合并进现有 Cookie 并持久化
+- 登录态关键 Cookie 变化（如轮换）会自动将状态重置为 `unknown`，等待下一次 Cookie 检查重新验证
+- 普通跟踪 Cookie（`__jda`、`nbpt` 等）变化不会影响已确认的"有效"状态，避免频繁通知
+
+---
+
 ## v2.2.0 - 2026-09-08
 
 ### 京东扫码登录功能

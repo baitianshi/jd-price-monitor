@@ -165,14 +165,15 @@ function handlePost($db, $jd) {
     $defaultThreshold = $settings['default_price_threshold'] ?? 5;
     
     $originalPrice = $productInfo['original_price'] ?? $price;
+    $plusPrice = $productInfo['plus_price'] ?? 0;
     
     $db->execute(
         "INSERT INTO products (
-            sku_id, name, image_url, current_price, target_price, original_price,
+            sku_id, name, image_url, current_price, target_price, original_price, plus_price,
             lowest_price, highest_price, price_change_threshold,
             tags, notify_price_drop, notify_lowest, notify_price_surge, notify_oos,
             status, stock_status, stock_num
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
         [
             $skuId,
             $name,
@@ -180,6 +181,7 @@ function handlePost($db, $jd) {
             $price,
             $data['target_price'] ?? ($price > 0 ? $price : 0),
             $originalPrice,
+            $plusPrice,
             $price,
             $price,
             $data['price_change_threshold'] ?? $defaultThreshold,
@@ -209,6 +211,7 @@ function handlePost($db, $jd) {
         'name' => $name,
         'price' => $price,
         'original_price' => $originalPrice,
+        'plus_price' => $plusPrice,
         'image_url' => '',
         'need_load_image' => true,
         'status' => $productInfo['status'] ?? 'success',
@@ -255,17 +258,18 @@ function handleBatchAdd($db, $jd, $urls, $data) {
             
             $price = $productInfo['price'] > 0 ? $productInfo['price'] : $jd->getPrice($skuId);
             $originalPrice = $productInfo['original_price'] ?? $price;
+            $plusPrice = $productInfo['plus_price'] ?? 0;
             
             // 获取默认设置
             $settings = $db->fetch("SELECT default_price_threshold FROM settings WHERE id = 1");
             
             $db->execute(
                 "INSERT INTO products (
-                    sku_id, name, image_url, current_price, target_price, original_price,
+                    sku_id, name, image_url, current_price, target_price, original_price, plus_price,
                     lowest_price, highest_price, price_change_threshold,
                     tags, notify_price_drop, notify_lowest, notify_price_surge, notify_oos,
                     status, stock_status, stock_num, history_retention_days
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
                 [
                     $skuId,
                     $productInfo['name'],
@@ -273,6 +277,7 @@ function handleBatchAdd($db, $jd, $urls, $data) {
                     $price,
                     $price,
                     $originalPrice,
+                    $plusPrice,
                     $price,
                     $price,
                     $settings['default_price_threshold'] ?? 5,
@@ -300,7 +305,8 @@ function handleBatchAdd($db, $jd, $urls, $data) {
             $results['success'][] = [
                 'sku_id' => $skuId,
                 'name' => $productInfo['name'],
-                'price' => $price
+                'price' => $price,
+                'plus_price' => $plusPrice
             ];
             
         } catch (Exception $e) {

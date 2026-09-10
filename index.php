@@ -200,7 +200,10 @@ if (isset($_GET['logout'])) {
                             <div class="flex items-center gap-2 px-2 py-1 bg-gradient-to-r from-blue-50 to-purple-50 rounded-full border border-blue-100">
                                 <span x-show="settings.jd_user?.isPlusVip" class="px-1.5 py-0.5 bg-gradient-to-r from-yellow-400 to-yellow-500 text-white text-xs rounded font-medium">PLUS</span>
                                 <span class="text-gray-700 font-medium" x-text="settings.jd_user?.nickname || ''"></span>
-                                <span x-show="settings.jd_user?.levelName" class="text-xs text-gray-500" x-text="settings.jd_user?.levelName"></span>
+                                <span x-show="settings.jd_user?.levelName" class="flex items-center gap-1 text-xs text-gray-500">
+                                    <i :data-lucide="(jdLevelInfo()?.current.icon) || 'user'" class="w-3 h-3"></i>
+                                    <span x-text="settings.jd_user?.levelName"></span>
+                                </span>
                             </div>
                         </div>
                         
@@ -428,6 +431,11 @@ if (isset($_GET['logout'])) {
                                                     <span class="text-base text-gray-400">暂无价格</span>
                                                 </template>
                                             </p>
+                                            <div x-show="product.plus_price && Number(product.plus_price) > 0 && Number(product.plus_price) < Number(product.current_price)"
+                                                class="mt-1 inline-flex items-center gap-1 px-2 py-0.5 bg-gradient-to-r from-yellow-50 to-amber-50 border border-yellow-200 rounded-full text-xs">
+                                                <span class="font-semibold text-yellow-700">PLUS专享</span>
+                                                <span class="text-amber-600 font-medium">¥<span x-text="Number(product.plus_price || 0).toFixed(2)"></span></span>
+                                            </div>
                                         </div>
                                         
                                         <div>
@@ -980,15 +988,22 @@ if (isset($_GET['logout'])) {
                                 <div class="flex justify-between items-center mb-2">
                                     <label class="text-sm font-medium text-gray-700">京东Cookie</label>
                                     <div class="flex gap-2">
-                                        <button @click="openQrLogin()" type="button"
-                                            class="text-xs px-3 py-1 bg-green-50 text-green-600 rounded-full hover:bg-green-100 transition flex items-center gap-1">
-                                            <i data-lucide="scan-line" class="w-3 h-3"></i>
-                                            扫码登录
-                                        </button>
                                         <button @click="showCookieHelper = true" type="button"
                                             class="text-xs px-3 py-1 bg-blue-50 text-blue-600 rounded-full hover:bg-blue-100 transition flex items-center gap-1">
                                             <i data-lucide="key" class="w-3 h-3"></i>
                                             Cookie获取助手
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="mb-4">
+                                    <label class="text-xs text-gray-500 mb-1 block">快速回填（可选）</label>
+                                    <div class="flex gap-2">
+                                        <textarea x-model="cookieRaw" rows="2"
+                                            placeholder="登录京东后，用「一键复制Cookie」书签或F12复制完整Cookie粘贴到这里"
+                                            class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-transparent outline-none text-sm resize-none"></textarea>
+                                        <button @click="parseCookie()" type="button"
+                                            class="px-4 py-2 gradient-bg text-white rounded-lg font-medium hover:opacity-90 transition text-sm self-start whitespace-nowrap">
+                                            解析回填
                                         </button>
                                     </div>
                                 </div>
@@ -1030,28 +1045,89 @@ if (isset($_GET['logout'])) {
                             </div>
                             
                             <!-- 用户信息 -->
-                            <div x-show="settings.jd_user" class="bg-gray-50 rounded-lg p-4 mt-3">
-                                <div class="flex items-center gap-3 mb-3">
-                                    <img x-show="settings.jd_user?.headImage" :src="settings.jd_user?.headImage" 
-                                        class="w-10 h-10 rounded-full">
-                                    <div>
-                                        <div class="font-medium text-gray-800" x-text="settings.jd_user?.nickname || '京东用户'"></div>
-                                        <div class="text-xs text-gray-500" x-text="settings.jd_user?.levelName || ''"></div>
+                            <div x-show="settings.jd_user" class="mt-3 rounded-xl border border-gray-200 overflow-hidden">
+                                <!-- 头部（默认折叠，点击展开） -->
+                                <button type="button" @click="toggleUserInfo()"
+                                    class="w-full flex items-center gap-3 p-4 text-left hover:bg-gray-50 transition bg-gradient-to-r from-blue-50 to-purple-50">
+                                    <img x-show="settings.jd_user?.headImage" :src="settings.jd_user?.headImage"
+                                        class="w-11 h-11 rounded-full ring-2 ring-white shadow-sm object-cover">
+                                    <div x-show="!settings.jd_user?.headImage" class="w-11 h-11 rounded-full bg-white/70 flex items-center justify-center shadow-sm">
+                                        <i data-lucide="user" class="w-6 h-6 text-gray-400"></i>
                                     </div>
-                                </div>
-                                <div class="grid grid-cols-2 gap-3 text-sm">
-                                    <div class="flex items-center gap-2">
-                                        <span class="text-gray-500">京豆:</span>
-                                        <span class="font-medium text-orange-500" x-text="settings.jd_user?.beanNum || 0"></span>
+                                    <div class="flex-1 min-w-0">
+                                        <div class="flex items-center gap-2">
+                                            <span class="font-semibold text-gray-800 truncate" x-text="settings.jd_user?.nickname || '京东用户'"></span>
+                                            <span x-show="settings.jd_user?.isPlusVip" class="px-1.5 py-0.5 bg-gradient-to-r from-yellow-400 to-yellow-500 text-white text-xs rounded font-semibold">PLUS</span>
+                                        </div>
+                                        <div class="flex items-center gap-1 text-xs text-gray-500 mt-0.5">
+                                            <i :data-lucide="(jdLevelInfo()?.current.icon) || 'user'" class="w-3.5 h-3.5"></i>
+                                            <span x-text="settings.jd_user?.levelName || '京东会员'"></span>
+                                        </div>
                                     </div>
-                                    <div class="flex items-center gap-2">
-                                        <span class="text-gray-500">会员:</span>
-                                        <span x-show="settings.jd_user?.isPlusVip" class="text-yellow-600 font-medium">Plus会员</span>
-                                        <span x-show="!settings.jd_user?.isPlusVip" class="text-gray-400">普通用户</span>
+                                    <i data-lucide="chevron-down" class="w-5 h-5 text-gray-400 transition-transform duration-200 flex-shrink-0" :class="{'rotate-180': userInfoExpanded}"></i>
+                                </button>
+                                
+                                <!-- 展开内容 -->
+                                <div x-show="userInfoExpanded"
+                                    x-transition:enter="transition ease-out duration-200"
+                                    x-transition:enter-start="opacity-0 -translate-y-1"
+                                    x-transition:enter-end="opacity-100 translate-y-0"
+                                    x-transition:leave="transition ease-in duration-150"
+                                    x-transition:leave-start="opacity-100"
+                                    x-transition:leave-end="opacity-0"
+                                    class="px-4 pb-4 pt-3 space-y-3 bg-white">
+                                    
+                                    <!-- 会员等级 + 成长值 -->
+                                    <div class="rounded-lg p-3" :style="'background-color:' + (jdLevelInfo()?.current.bg || '#F3F4F6')">
+                                        <div class="flex items-center justify-between mb-2">
+                                            <div class="flex items-center gap-2">
+                                                <i :data-lucide="(jdLevelInfo()?.current.icon) || 'user'" class="w-5 h-5" :style="'color:' + (jdLevelInfo()?.current.color || '#6B7280')"></i>
+                                                <span class="text-sm font-medium" x-text="jdLevelInfo()?.current.label || '京东会员'"></span>
+                                            </div>
+                                            <span class="text-xs" :style="'color:' + (jdLevelInfo()?.current.color || '#6B7280')">
+                                                成长值 <span class="font-bold" x-text="jdLevelInfo()?.growth || 0"></span>
+                                            </span>
+                                        </div>
+                                        <div class="h-1.5 bg-white/80 rounded-full overflow-hidden">
+                                            <div class="h-full rounded-full transition-all duration-500"
+                                                :style="'width:' + (jdLevelInfo()?.progress || 0) + '%; background-color:' + (jdLevelInfo()?.current.color || '#6B7280')"></div>
+                                        </div>
+                                        <div class="flex justify-between text-xs text-gray-500 mt-1.5">
+                                            <span x-text="jdLevelInfo()?.current.label"></span>
+                                            <span x-text="jdLevelInfo()?.next ? ('距' + jdLevelInfo().next.label + '还需 ' + Math.max(0, jdLevelInfo().next.min - jdLevelInfo().growth) + ' 成长值') : '已满级'"></span>
+                                        </div>
                                     </div>
-                                    <div x-show="settings.jd_user?.isPlusVip && settings.jd_user?.plusExpireTime" class="col-span-2 flex items-center gap-2">
-                                        <span class="text-gray-500">到期时间:</span>
-                                        <span class="text-gray-700" x-text="settings.jd_user?.plusExpireTime"></span>
+                                    
+                                    <!-- 京享值 -->
+                                    <div class="flex items-center justify-between rounded-lg border border-gray-200 p-3">
+                                        <div class="flex items-center gap-2">
+                                            <i data-lucide="star" class="w-4 h-4 text-gray-400"></i>
+                                            <span class="text-sm text-gray-600">京享值</span>
+                                        </div>
+                                        <div class="flex items-center gap-2">
+                                            <span class="font-semibold text-gray-800" x-text="jdShareScoreInfo().score || '--'"></span>
+                                            <span class="px-1.5 py-0.5 text-xs rounded-full text-white" :style="'background-color:' + jdShareScoreInfo().color" x-text="jdShareScoreInfo().label"></span>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- 京豆 / 会员身份 -->
+                                    <div class="grid grid-cols-2 gap-2 text-sm">
+                                        <div class="rounded-lg border border-gray-200 p-3">
+                                            <div class="text-xs text-gray-500">京豆</div>
+                                            <div class="font-semibold text-orange-500 mt-1" x-text="settings.jd_user?.beanNum || 0"></div>
+                                        </div>
+                                        <div class="rounded-lg border border-gray-200 p-3">
+                                            <div class="text-xs text-gray-500">会员身份</div>
+                                            <div class="font-semibold mt-1" :class="settings.jd_user?.isPlusVip ? 'text-yellow-600' : 'text-gray-500'">
+                                                <span x-show="settings.jd_user?.isPlusVip">Plus会员</span>
+                                                <span x-show="!settings.jd_user?.isPlusVip">普通用户</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div x-show="settings.jd_user?.isPlusVip && settings.jd_user?.plusExpireTime" class="text-xs text-gray-500 flex items-center gap-1">
+                                        <i data-lucide="clock" class="w-3.5 h-3.5"></i>
+                                        <span>Plus到期：<span x-text="settings.jd_user?.plusExpireTime"></span></span>
                                     </div>
                                 </div>
                             </div>
@@ -1333,96 +1409,6 @@ if (isset($_GET['logout'])) {
             </div>
         </div>
         
-        <!-- 扫码登录弹窗 -->
-        <div x-show="showQrLogin" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4 modal-overlay" @click.self="closeQrLogin()">
-            <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm slide-in" @click.stop>
-                <div class="p-6 border-b flex justify-between items-center">
-                    <h3 class="text-lg font-semibold text-gray-800 flex items-center gap-2">
-                        <i data-lucide="scan-line" class="w-5 h-5 text-green-600"></i>
-                        京东扫码登录
-                    </h3>
-                    <button @click="closeQrLogin()" class="p-2 hover:bg-gray-100 rounded-lg">
-                        <i data-lucide="x" class="w-5 h-5"></i>
-                    </button>
-                </div>
-                
-                <div class="p-6 text-center">
-                    <!-- 二维码区域 -->
-                    <div class="relative mx-auto w-56 h-56 mb-4">
-                        <!-- 加载状态 -->
-                        <div x-show="qrStatus === 'loading'" class="w-full h-full flex items-center justify-center bg-gray-50 rounded-xl">
-                            <div class="loading-spinner w-10 h-10"></div>
-                        </div>
-                        
-                        <!-- 二维码图片 -->
-                        <img x-show="qrStatus !== 'loading' && qrStatus !== 'error' && qrcodeImage" 
-                            :src="qrcodeImage" 
-                            alt="京东登录二维码"
-                            class="w-full h-full object-contain rounded-xl border border-gray-200"
-                            :class="{'opacity-30': qrStatus === 'scanned' || qrStatus === 'expired' || qrStatus === 'confirmed'}">
-                        
-                        <!-- 已扫描遮罩 -->
-                        <div x-show="qrStatus === 'scanned'" class="absolute inset-0 flex items-center justify-center bg-blue-500/10 rounded-xl">
-                            <div class="bg-white rounded-full p-4 shadow-lg">
-                                <i data-lucide="smartphone" class="w-12 h-12 text-blue-600"></i>
-                            </div>
-                        </div>
-                        
-                        <!-- 已确认遮罩 -->
-                        <div x-show="qrStatus === 'confirmed'" class="absolute inset-0 flex items-center justify-center bg-green-500/10 rounded-xl">
-                            <div class="bg-white rounded-full p-4 shadow-lg">
-                                <i data-lucide="check-circle" class="w-12 h-12 text-green-600"></i>
-                            </div>
-                        </div>
-                        
-                        <!-- 过期遮罩 -->
-                        <div x-show="qrStatus === 'expired'" class="absolute inset-0 flex items-center justify-center bg-gray-500/10 rounded-xl">
-                            <div class="bg-white rounded-full p-4 shadow-lg cursor-pointer" @click="refreshQrCode()">
-                                <i data-lucide="refresh-cw" class="w-12 h-12 text-gray-600"></i>
-                            </div>
-                        </div>
-                        
-                        <!-- 错误状态 -->
-                        <div x-show="qrStatus === 'error'" class="w-full h-full flex flex-col items-center justify-center bg-red-50 rounded-xl p-4">
-                            <i data-lucide="alert-circle" class="w-12 h-12 text-red-500 mb-2"></i>
-                            <button @click="refreshQrCode()" class="text-sm text-red-600 hover:underline">点击重试</button>
-                        </div>
-                    </div>
-                    
-                    <!-- 状态提示 -->
-                    <p class="text-sm font-medium" 
-                        :class="{
-                            'text-gray-600': qrStatus === 'waiting' || qrStatus === 'loading',
-                            'text-blue-600': qrStatus === 'scanned',
-                            'text-green-600': qrStatus === 'confirmed',
-                            'text-gray-500': qrStatus === 'expired',
-                            'text-red-600': qrStatus === 'error'
-                        }"
-                        x-text="qrMessage"></p>
-                    
-                    <!-- 提示信息 -->
-                    <p class="text-xs text-gray-400 mt-4">
-                        打开京东APP → 右上角扫一扫 → 扫描二维码登录
-                    </p>
-                    
-                    <!-- 刷新按钮 -->
-                    <div class="mt-4" x-show="qrStatus === 'waiting'">
-                        <button @click="refreshQrCode()" class="text-xs text-gray-500 hover:text-primary transition flex items-center gap-1 mx-auto">
-                            <i data-lucide="refresh-cw" class="w-3 h-3"></i>
-                            刷新二维码
-                        </button>
-                    </div>
-                    
-                    <!-- 过期刷新按钮 -->
-                    <div class="mt-4" x-show="qrStatus === 'expired'">
-                        <button @click="refreshQrCode()" class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition text-sm">
-                            点击刷新
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
         <!-- Cookie获取助手弹窗 -->
         <div x-show="showCookieHelper" x-cloak class="fixed inset-0 z-50 flex items-center justify-center p-4 modal-overlay" @click.self="showCookieHelper = false">
             <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto slide-in" @click.stop>
@@ -1467,6 +1453,26 @@ if (isset($_GET['logout'])) {
                                 <p>格式：<code class="bg-white px-1 rounded">pt_key=xxx;pt_pin=xxx</code></p>
                             </div>
                         </div>
+                    </div>
+                    
+                    <!-- 一键复制Cookie书签 -->
+                    <div class="border border-blue-200 bg-blue-50 rounded-xl p-5">
+                        <div class="flex items-center gap-2 mb-3">
+                            <span class="px-2 py-0.5 bg-blue-600 text-white text-xs rounded-full">推荐</span>
+                            <h4 class="font-semibold text-gray-800">一键复制Cookie（书签栏脚本）</h4>
+                        </div>
+                        <ol class="space-y-2 text-sm text-gray-600 list-decimal list-inside">
+                            <li>将下方蓝色按钮<strong>拖拽到浏览器书签栏</strong></li>
+                            <li>在京东页面（m.jd.com）<strong>登录后</strong>，点击该书签</li>
+                            <li>提示「已复制」后，回到本系统设置页，粘贴到「快速回填」框，点「解析回填」</li>
+                        </ol>
+                        <div class="mt-3">
+                            <a href="javascript:(function(){var d=document.cookie;if(!d){alert('请先登录京东');return;}var ta=document.createElement('textarea');ta.value=d;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);alert('Cookie已复制，请回到系统设置页粘贴解析。');})();"
+                               class="inline-block px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition text-sm">
+                                📋 一键复制Cookie
+                            </a>
+                        </div>
+                        <p class="text-xs text-gray-400 mt-2">若无法拖拽，可在书签栏手动新建书签，名称随意，网址填上方脚本代码即可。</p>
                     </div>
                     
                     <!-- 注意事项 -->

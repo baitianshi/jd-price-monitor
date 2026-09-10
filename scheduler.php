@@ -4,7 +4,7 @@
  * 
  * 功能：
  * 1. 随机刷新单个商品价格（60-120分钟间隔）
- * 2. 检查Cookie状态（120-300分钟间隔，精确到秒）
+ * 2. 检查Cookie状态（6-12小时间隔，精确到分钟）
  * 3. 执行价格保护（6-12小时间隔，精确到分钟）
  * 4. 清理过期历史数据（每24小时执行一次）
  * 5. 随机浏览京东页面模拟真人行为
@@ -58,14 +58,17 @@ function isInSilentPeriod($db) {
     return ($now >= $start && $now < $end);
 }
 
-function randomBrowseJd($jd) {
-    logMessage("模拟真人浏览 m.jd.com...");
+function randomBrowseJd($db, $jd) {
+    logMessage("模拟真人浏览购物车...");
     
-    $result = $jd->randomBrowseFromMobile();
+    $products = $db->fetchAll("SELECT sku_id FROM products WHERE status = 'active'");
+    $skus = array_map(function($p) { return $p['sku_id']; }, $products);
+    
+    $result = $jd->randomBrowseCart($skus);
     
     if ($result['success']) {
-        $extracted = isset($result['extracted_links']) ? "，提取到 {$result['extracted_links']} 个链接" : '';
-        logMessage("浏览完成，共访问 {$result['visited_count']} 个页面{$extracted}");
+        $cartCount = isset($result['cart_count']) ? "，监控商品 {$result['cart_count']} 个" : '';
+        logMessage("浏览完成，共访问 {$result['visited_count']} 个页面{$cartCount}");
         foreach ($result['pages'] as $page) {
             $status = $page['success'] ? '成功' : '失败';
             $delay = isset($page['delay']) ? "，停留 {$page['delay']} 秒" : '';
@@ -93,7 +96,7 @@ function checkProductPrice($db, $jd, $webhook, $force = false) {
         return false;
     }
     
-    randomBrowseJd($jd);
+    randomBrowseJd($db, $jd);
     
     logMessage("检查商品: [{$product['id']}] {$product['name']}");
     
@@ -105,6 +108,7 @@ function checkProductPrice($db, $jd, $webhook, $force = false) {
     $newStockStatus = $productInfo['stock_status'] ?? $oldStockStatus;
     $newStockNum = $productInfo['stock_num'] ?? null;
     $originalPrice = $productInfo['original_price'] ?? $newPrice;
+    $plusPrice = $productInfo['plus_price'] ?? 0;
     
     if ($newPrice > 0) {
         $lowestPrice = floatval($product['lowest_price']);
@@ -121,6 +125,7 @@ function checkProductPrice($db, $jd, $webhook, $force = false) {
             "UPDATE products SET 
                 current_price = ?, 
                 original_price = ?, 
+                plus_price = ?,
                 lowest_price = ?,
                 highest_price = ?,
                 stock_status = ?,
@@ -128,7 +133,7 @@ function checkProductPrice($db, $jd, $webhook, $force = false) {
                 last_checked_at = datetime('now', 'localtime'),
                 updated_at = datetime('now', 'localtime') 
             WHERE id = ?",
-            [$newPrice, $originalPrice, $lowestPrice, $highestPrice, $newStockStatus, $newStockNum, $product['id']]
+            [$newPrice, $originalPrice, $plusPrice, $lowestPrice, $highestPrice, $newStockStatus, $newStockNum, $product['id']]
         );
         
         if ($newPrice != $oldPrice || $newStockStatus != $oldStockStatus) {

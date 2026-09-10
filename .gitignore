@@ -31,3 +31,8 @@ trace.*
 # Composer
 /vendor/
 composer.lock
+
+# 发布/构建产物
+/release/
+includes.zip
+*.zip

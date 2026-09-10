@@ -42,10 +42,6 @@ class Database {
         return self::$instance;
     }
     
-    public function getPdo() {
-        return $this->pdo;
-    }
-    
     /**
      * 初始化数据表
      */
@@ -59,6 +55,7 @@ class Database {
             image_url TEXT,
             current_price REAL DEFAULT 0,
             original_price REAL DEFAULT 0,
+            plus_price REAL DEFAULT 0,
             target_price REAL DEFAULT 0,
             lowest_price REAL DEFAULT 0,
             highest_price REAL DEFAULT 0,
@@ -168,6 +165,37 @@ class Database {
             message TEXT,
             applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+        
+        -- 系统设置表（设备指纹等系统级配置）
+        CREATE TABLE IF NOT EXISTS system_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            setting_key TEXT UNIQUE NOT NULL,
+            setting_value TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- 分域Cookie表
+        CREATE TABLE IF NOT EXISTS domain_cookies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain TEXT UNIQUE NOT NULL,
+            cookie_data TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- 接口降级表
+        CREATE TABLE IF NOT EXISTS api_degradation (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            api_name TEXT UNIQUE NOT NULL,
+            fail_count INTEGER DEFAULT 0,
+            is_degraded INTEGER DEFAULT 0,
+            degraded_at DATETIME,
+            recover_at DATETIME,
+            last_fail_at DATETIME,
+            last_success_at DATETIME,
+            total_fail INTEGER DEFAULT 0,
+            total_success INTEGER DEFAULT 0,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         ";
         
         $this->pdo->exec($sql);
@@ -188,6 +216,9 @@ class Database {
         
         if (!in_array('original_price', $productFields)) {
             $this->pdo->exec("ALTER TABLE products ADD COLUMN original_price REAL DEFAULT 0");
+        }
+        if (!in_array('plus_price', $productFields)) {
+            $this->pdo->exec("ALTER TABLE products ADD COLUMN plus_price REAL DEFAULT 0");
         }
         if (!in_array('stock_num', $productFields)) {
             $this->pdo->exec("ALTER TABLE products ADD COLUMN stock_num INTEGER");
@@ -301,26 +332,5 @@ class Database {
      */
     public function lastInsertId() {
         return $this->pdo->lastInsertId();
-    }
-    
-    /**
-     * 开始事务
-     */
-    public function beginTransaction() {
-        return $this->pdo->beginTransaction();
-    }
-    
-    /**
-     * 提交事务
-     */
-    public function commit() {
-        return $this->pdo->commit();
-    }
-    
-    /**
-     * 回滚事务
-     */
-    public function rollBack() {
-        return $this->pdo->rollBack();
     }
 }
